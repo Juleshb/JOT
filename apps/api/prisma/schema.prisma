@@ -1,0 +1,97 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  RIDER
+  DRIVER
+  ADMIN
+}
+
+enum DriverVerificationStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum RideStatus {
+  REQUESTED
+  ACCEPTED
+  STARTED
+  COMPLETED
+  CANCELLED
+}
+
+enum RidePaymentMethod {
+  CASH
+  CARD
+}
+
+enum RidePaymentStatus {
+  PENDING
+  COMPLETED
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  name         String
+  phone        String?
+  role         UserRole
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  driverProfile DriverProfile?
+  ridesAsRider  Ride[]        @relation("RiderRides")
+  ridesAsDriver Ride[]        @relation("DriverRides")
+}
+
+model DriverProfile {
+  id String                   @id @default(cuid())
+  userId             String                   @unique
+  user               User                     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  vehicleMake        String
+  vehicleModel       String
+  vehicleColor       String
+  licensePlate       String
+  verificationStatus DriverVerificationStatus @default(PENDING)
+  isOnline           Boolean                  @default(false)
+  currentLat         Float?
+  currentLng         Float?
+  updatedAt          DateTime                 @updatedAt
+}
+
+model Ride {
+  id             String     @id @default(cuid())
+  riderId        String
+  rider          User       @relation("RiderRides", fields: [riderId], references: [id], onDelete: Cascade)
+  driverId       String?
+  driver         User?      @relation("DriverRides", fields: [driverId], references: [id], onDelete: SetNull)
+  status         RideStatus @default(REQUESTED)
+  pickupLat      Float
+  pickupLng      Float
+  pickupAddress  String
+  dropoffLat     Float
+  dropoffLng     Float
+  dropoffAddress String
+  fareEstimate   Float?
+  fareFinal      Float?
+  paymentMethod  RidePaymentMethod
+  paymentStatus  RidePaymentStatus @default(PENDING)
+  stripePaymentIntentId String?
+  createdAt      DateTime   @default(now())
+  acceptedAt     DateTime?
+  startedAt      DateTime?
+  completedAt    DateTime?
+  cancelledAt    DateTime?
+
+  @@index([riderId, status])
+  @@index([driverId, status])
+  @@index([status, createdAt])
+}
