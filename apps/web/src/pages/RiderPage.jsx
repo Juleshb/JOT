@@ -53,6 +53,7 @@ export default function RiderPage({
   const [pendingRideId, setPendingRideId] = useState('')
   const [waitSecondsLeft, setWaitSecondsLeft] = useState(120)
   const [realtimeStatusLine, setRealtimeStatusLine] = useState('Waiting for driver response…')
+  const [toastNotification, setToastNotification] = useState('')
   const waitingVoiceAtRef = useRef(0)
   const [mapViewMode, setMapViewMode] = useState(() => {
     if (typeof window === 'undefined') return 'driver'
@@ -62,6 +63,19 @@ export default function RiderPage({
   const isDriverMapView = mapViewMode === 'driver'
 
   const selectedFareUsd = routeOptions[selectedRouteIndex]?.priceUsd ?? null
+
+  const speakMessage = (text) => {
+    if (typeof window === 'undefined' || !('speechSynthesis' in window)) return
+    try {
+      window.speechSynthesis.cancel()
+      const utterance = new window.SpeechSynthesisUtterance(text)
+      utterance.rate = 1
+      utterance.pitch = 1
+      window.speechSynthesis.speak(utterance)
+    } catch {
+      /* ignore browser speech synthesis errors */
+    }
+  }
 
   const resetPaymentModal = () => {
     setPayView('driver')
@@ -153,6 +167,14 @@ export default function RiderPage({
   }, [payView, pendingRideId])
 
   useEffect(() => {
+    if (!toastNotification) return undefined
+    const timer = window.setTimeout(() => {
+      setToastNotification('')
+    }, 6000)
+    return () => window.clearTimeout(timer)
+  }, [toastNotification])
+
+  useEffect(() => {
     if (payView !== 'waiting' || !pendingRideId || !authToken) return
 
     const socket = io(import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:3000', {
@@ -231,6 +253,12 @@ export default function RiderPage({
         const message = err?.message || 'Could not load nearby drivers.'
         setPayError(message)
         setRiderMessage(message)
+        if (message.toLowerCase().includes('no nearby online drivers')) {
+          setToastNotification('No nearby drivers found. Please try again in a moment.')
+          speakMessage(
+            'No driver is currently available near your location. Please wait and try again.',
+          )
+        }
       })
       .finally(() => {
         setPayBusy(false)
@@ -544,6 +572,29 @@ export default function RiderPage({
 
   return (
     <section className="mx-auto w-full max-w-[1700px] px-4 pb-14 pt-24 sm:px-6 md:pt-28">
+      {toastNotification && (
+        <div className="pointer-events-none fixed right-4 top-24 z-[140] max-w-sm">
+          <div
+            className={`pointer-events-auto rounded-xl border px-4 py-3 text-sm font-semibold shadow-xl ${
+              darkMode
+                ? 'border-[#9d3733]/55 bg-black/85 text-[#f2e3bb]'
+                : 'border-[#9d3733]/35 bg-white text-[#2d100f]'
+            }`}
+          >
+            <div className="flex items-start justify-between gap-3">
+              <p>{toastNotification}</p>
+              <button
+                type="button"
+                onClick={() => setToastNotification('')}
+                className="rounded p-1 text-xs opacity-80 transition hover:bg-[#9d3733]/15 hover:opacity-100"
+                aria-label="Dismiss notification"
+              >
+                ×
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       <div
         className={`px-0 pt-0 pb-0 xl:rounded-2xl xl:border xl:p-8 ${
           darkMode

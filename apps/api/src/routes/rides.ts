@@ -112,10 +112,6 @@ router.post('/', requireAuth, requireRole('RIDER'), async (req, res, next) => {
       if (profile.currentLat == null || profile.currentLng == null) {
         throw new HttpError(400, 'Selected driver location is unavailable');
       }
-      const km = haversineKm(body.pickupLat, body.pickupLng, profile.currentLat, profile.currentLng);
-      if (km > 15) {
-        throw new HttpError(400, 'Selected driver is too far from pickup');
-      }
       preferredDriverId = body.preferredDriverId;
     }
     const paymentMethod = body.paymentMethod ?? 'CASH';
