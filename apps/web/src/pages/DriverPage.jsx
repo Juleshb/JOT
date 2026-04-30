@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import mapboxgl from 'mapbox-gl'
+import { io } from 'socket.io-client'
 import {
   acceptRide,
   completeRide,
@@ -58,14 +59,18 @@ export default function DriverPage({
   const [statusNote, setStatusNote] = useState('')
   const [actionBusy, setActionBusy] = useState(false)
   const [offerId, setOfferId] = useState('')
+  const [offerPopup, setOfferPopup] = useState(null)
   const [liveLocation, setLiveLocation] = useState(null)
   const [mapWebGlError, setMapWebGlError] = useState(null)
 
   const mapContainerRef = useRef(null)
   const mapRef = useRef(null)
   const driverMarkerRef = useRef(null)
+  const routeSourceIdRef = useRef('driver-pickup-route-source')
+  const routeLayerIdRef = useRef('driver-pickup-route-layer')
   const liveLocationRef = useRef(null)
   const darkModeRef = useRef(darkMode)
+  const popupTimerRef = useRef(null)
 
   const profile = authUser?.driverProfile
   const isApproved = profile?.verificationStatus === 'APPROVED'
@@ -245,6 +250,94 @@ export default function DriverPage({
     })
   }, [liveLocation])
 
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map || !mapboxAccessToken || !activeRide || !liveLocation) return undefined
+
+    const shouldShowTripRoute = ['ACCEPTED', 'STARTED'].includes(activeRide.status)
+    if (!shouldShowTripRoute) {
+      const src = map.getSource(routeSourceIdRef.current)
+      if (src) {
+        src.setData({ type: 'FeatureCollection', features: [] })
+      }
+      return undefined
+    }
+
+    let cancelled = false
+
+    const drawRoute = async () => {
+      try {
+        const from = `${liveLocation.lng},${liveLocation.lat}`
+        const routeTarget =
+          activeRide.status === 'STARTED'
+            ? `${activeRide.dropoffLng},${activeRide.dropoffLat}`
+            : `${activeRide.pickupLng},${activeRide.pickupLat}`
+        const response = await fetch(
+          `https://api.mapbox.com/directions/v5/mapbox/driving/${from};${routeTarget}?geometries=geojson&overview=full&steps=false&alternatives=false&access_token=${mapboxAccessToken}`,
+        )
+        if (!response.ok) return
+        const data = await response.json()
+        const coords = data?.routes?.[0]?.geometry?.coordinates
+        if (!Array.isArray(coords) || coords.length < 2 || cancelled) return
+
+        const featureCollection = {
+          type: 'FeatureCollection',
+          features: [
+            {
+              type: 'Feature',
+              geometry: {
+                type: 'LineString',
+                coordinates: coords,
+              },
+            },
+          ],
+        }
+
+        const ensureLayer = () => {
+          if (!map.getSource(routeSourceIdRef.current)) {
+            map.addSource(routeSourceIdRef.current, {
+              type: 'geojson',
+              data: featureCollection,
+            })
+          } else {
+            map.getSource(routeSourceIdRef.current).setData(featureCollection)
+          }
+
+          if (!map.getLayer(routeLayerIdRef.current)) {
+            map.addLayer({
+              id: routeLayerIdRef.current,
+              type: 'line',
+              source: routeSourceIdRef.current,
+              layout: {
+                'line-cap': 'round',
+                'line-join': 'round',
+              },
+              paint: {
+                'line-color': '#9d3733',
+                'line-width': 5,
+                'line-opacity': 0.95,
+              },
+            })
+          }
+        }
+
+        if (map.isStyleLoaded()) {
+          ensureLayer()
+        } else {
+          map.once('style.load', ensureLayer)
+        }
+      } catch {
+        /* ignore transient routing errors */
+      }
+    }
+
+    drawRoute()
+
+    return () => {
+      cancelled = true
+    }
+  }, [activeRide, liveLocation, mapboxAccessToken])
+
   const toggleOnline = async (next) => {
     if (!authToken) return
     setStatusBusy(true)
@@ -285,12 +378,13 @@ export default function DriverPage({
 
   const onAcceptOffer = async () => {
     const id = offerId.trim()
-    if (!authToken || !id) return
+    if (!id) return
     setActionBusy(true)
     setStatusNote('')
     try {
       await acceptRide(authToken, id)
       setOfferId('')
+      setOfferPopup(null)
       await fetchRideDashboard()
     } catch (e) {
       setStatusNote(e.message || 'Could not accept ride.')
@@ -298,6 +392,87 @@ export default function DriverPage({
       setActionBusy(false)
     }
   }
+
+  const onAcceptOfferById = async (rideId) => {
+    const id = rideId?.trim()
+    if (!authToken || !id) return
+    setActionBusy(true)
+    setStatusNote('')
+    try {
+      await acceptRide(authToken, id)
+      setOfferId('')
+      setOfferPopup(null)
+      await fetchRideDashboard()
+    } catch (e) {
+      setStatusNote(e.message || 'Could not accept ride.')
+    } finally {
+      setActionBusy(false)
+    }
+  }
+
+  useEffect(() => {
+    if (!authToken || authUser?.role !== 'DRIVER') return undefined
+
+    const socket = io(import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:3000', {
+      auth: { token: authToken },
+      transports: ['websocket'],
+    })
+
+    socket.on('ride:offer', (payload) => {
+      if (!payload?.rideId) return
+      setOfferPopup(payload)
+      setOfferId(payload.rideId)
+
+      // Subtle short alert tone for a new request.
+      try {
+        const AudioCtx = window.AudioContext || window.webkitAudioContext
+        if (AudioCtx) {
+          const ctx = new AudioCtx()
+          const osc = ctx.createOscillator()
+          const gain = ctx.createGain()
+          osc.type = 'sine'
+          osc.frequency.value = 880
+          gain.gain.value = 0.0001
+          osc.connect(gain)
+          gain.connect(ctx.destination)
+          const now = ctx.currentTime
+          gain.gain.exponentialRampToValueAtTime(0.035, now + 0.02)
+          gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.22)
+          osc.start(now)
+          osc.stop(now + 0.23)
+          window.setTimeout(() => {
+            void ctx.close()
+          }, 300)
+        }
+      } catch {
+        /* Ignore audio errors caused by browser autoplay policies. */
+      }
+    })
+
+    return () => {
+      socket.disconnect()
+    }
+  }, [authToken, authUser?.role])
+
+  useEffect(() => {
+    if (popupTimerRef.current) {
+      window.clearTimeout(popupTimerRef.current)
+      popupTimerRef.current = null
+    }
+
+    if (!offerPopup) return undefined
+
+    popupTimerRef.current = window.setTimeout(() => {
+      setOfferPopup(null)
+    }, 120000)
+
+    return () => {
+      if (popupTimerRef.current) {
+        window.clearTimeout(popupTimerRef.current)
+        popupTimerRef.current = null
+      }
+    }
+  }, [offerPopup])
 
   const onStartTrip = async () => {
     if (!authToken || !activeRide?.id) return
@@ -402,6 +577,36 @@ export default function DriverPage({
 
   return (
     <div className={shellClass}>
+      {offerPopup && (
+        <div className="fixed right-4 top-20 z-[120] w-[min(92vw,360px)] rounded-2xl border border-[#9d3733]/60 bg-[#111] p-4 text-[#f2e3bb] shadow-2xl shadow-black/40">
+          <p className="text-xs font-semibold uppercase tracking-wide text-[#9d3733]">
+            New ride request
+          </p>
+          <p className="mt-1 text-sm font-bold">{offerPopup.riderName ?? 'Rider request'}</p>
+          <p className="mt-1 text-xs opacity-90">From: {offerPopup.pickupAddress}</p>
+          <p className="text-xs opacity-90">To: {offerPopup.dropoffAddress}</p>
+          <p className="mt-1 text-xs opacity-80">
+            Fare: {offerPopup.fareEstimate != null ? `$${offerPopup.fareEstimate}` : 'N/A'}
+          </p>
+          <div className="mt-3 flex gap-2">
+            <button
+              type="button"
+              disabled={actionBusy}
+              onClick={() => onAcceptOfferById(offerPopup.rideId)}
+              className="flex-1 rounded-lg bg-[#9d3733] px-3 py-2 text-xs font-bold text-[#f2e3bb] transition hover:bg-[#842f2b] disabled:opacity-60"
+            >
+              {actionBusy ? 'Accepting…' : 'Accept now'}
+            </button>
+            <button
+              type="button"
+              onClick={() => setOfferPopup(null)}
+              className="rounded-lg border border-[#9d3733]/50 px-3 py-2 text-xs font-bold text-[#9d3733] transition hover:bg-[#9d3733]/10"
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
       <div className="mx-auto flex max-w-6xl flex-col gap-6 lg:grid lg:grid-cols-[minmax(0,1fr)_minmax(280px,380px)] lg:items-start lg:gap-8">
         <div className="order-2 flex flex-col gap-6 lg:order-1">
           <div className="flex flex-wrap items-end justify-between gap-4">
@@ -598,12 +803,36 @@ export default function DriverPage({
             ) : mapWebGlError ? (
               <div className={`${mapPlaceholderClass} mt-4 text-[#9d3733]`}>{mapWebGlError}</div>
             ) : (
-              <div
-                ref={mapContainerRef}
-                className={`mt-4 h-[min(52vh,440px)] w-full overflow-hidden rounded-2xl border ${
-                  darkMode ? 'border-[#9d3733]/40' : 'border-[#9d3733]/30'
-                }`}
-              />
+              <div className="relative mt-4">
+                <div
+                  ref={mapContainerRef}
+                  className={`h-[min(52vh,440px)] w-full overflow-hidden rounded-2xl border ${
+                    darkMode ? 'border-[#9d3733]/40' : 'border-[#9d3733]/30'
+                  }`}
+                />
+                {activeRide?.status === 'ACCEPTED' && (
+                  <div
+                    className={`pointer-events-none absolute left-3 top-3 rounded-full border px-3 py-1 text-xs font-semibold ${
+                      darkMode
+                        ? 'border-[#f2e3bb]/35 bg-black/75 text-[#f2e3bb]'
+                        : 'border-[#9d3733]/30 bg-white/90 text-[#9d3733]'
+                    }`}
+                  >
+                    Navigating to Pickup
+                  </div>
+                )}
+                {activeRide?.status === 'STARTED' && (
+                  <div
+                    className={`pointer-events-none absolute left-3 top-3 rounded-full border px-3 py-1 text-xs font-semibold ${
+                      darkMode
+                        ? 'border-[#f2e3bb]/35 bg-black/75 text-[#f2e3bb]'
+                        : 'border-[#9d3733]/30 bg-white/90 text-[#9d3733]'
+                    }`}
+                  >
+                    Trip in Progress to Dropoff
+                  </div>
+                )}
+              </div>
             )}
             {isOnline && isApproved && liveLocation && (
               <p className="mt-3 font-mono text-xs opacity-80">

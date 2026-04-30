@@ -101,6 +101,28 @@ export async function createRide(token, payload) {
   })
 }
 
+export async function setRidePayment(token, rideId, payload) {
+  return request(`/rides/${rideId}/payment`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify(payload),
+  })
+}
+
+export async function getNearbyDrivers(token, { lat, lng }) {
+  const params = new URLSearchParams({
+    lat: String(lat),
+    lng: String(lng),
+  })
+  return request(`/rides/nearby-drivers?${params.toString()}`, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+  })
+}
+
 export async function createRidePaymentIntent(token, { amountUsd }) {
   return request('/payments/ride-intent', {
     method: 'POST',

@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { io } from 'socket.io-client'
 import { formatDurationHoursMinutes } from '../lib/formatDuration'
 import { formatUsd } from '../lib/estimateFare'
-import { createRidePaymentIntent } from '../lib/api'
+import { createRidePaymentIntent, getNearbyDrivers } from '../lib/api'
 import { StripeRidePayment, stripePublishableConfigured } from '../components/StripeRidePayment'
 
 export default function RiderPage({
@@ -32,7 +33,8 @@ export default function RiderPage({
   fetchRiderData,
   activeRide,
   rideHistory,
-  confirmRideRequest,
+  requestPreferredDriver,
+  finalizeRidePayment,
   setRiderMessage,
   handleCancelRide,
   navigateToPage,
@@ -46,6 +48,12 @@ export default function RiderPage({
   const [stripeClientSecret, setStripeClientSecret] = useState(null)
   const [payBusy, setPayBusy] = useState(false)
   const [payError, setPayError] = useState('')
+  const [nearbyDrivers, setNearbyDrivers] = useState([])
+  const [selectedDriverId, setSelectedDriverId] = useState('')
+  const [pendingRideId, setPendingRideId] = useState('')
+  const [waitSecondsLeft, setWaitSecondsLeft] = useState(120)
+  const [realtimeStatusLine, setRealtimeStatusLine] = useState('Waiting for driver response…')
+  const waitingVoiceAtRef = useRef(0)
   const [mapViewMode, setMapViewMode] = useState(() => {
     if (typeof window === 'undefined') return 'driver'
     return window.localStorage.getItem(MAP_VIEW_STORAGE_KEY) === 'classic' ? 'classic' : 'driver'
@@ -56,10 +64,141 @@ export default function RiderPage({
   const selectedFareUsd = routeOptions[selectedRouteIndex]?.priceUsd ?? null
 
   const resetPaymentModal = () => {
-    setPayView('choose')
+    setPayView('driver')
     setStripeClientSecret(null)
     setPaymentFareUsd(null)
     setPayError('')
+    setNearbyDrivers([])
+    setSelectedDriverId('')
+  }
+
+  const selectedDriver =
+    nearbyDrivers.find((driver) => driver.userId === selectedDriverId) ?? null
+
+  useEffect(() => {
+    if (payView !== 'waiting' || !pendingRideId) return
+
+    setWaitSecondsLeft(120)
+    setRealtimeStatusLine('Waiting for driver response…')
+    let alive = true
+    const deadline = Date.now() + 120_000
+
+    const secondTicker = window.setInterval(() => {
+      const left = Math.max(0, Math.ceil((deadline - Date.now()) / 1000))
+      setWaitSecondsLeft(left)
+    }, 1000)
+
+    const poll = async () => {
+      const data = await fetchRiderData()
+      if (!alive) return
+      if (data?.active?.id === pendingRideId && data.active.status === 'ACCEPTED') {
+        setRealtimeStatusLine('Driver en route to pickup')
+        setPayView('choose')
+        setPayError('')
+        return
+      }
+      if (Date.now() >= deadline) {
+        try {
+          await handleCancelRide()
+        } catch {
+          /* ignore */
+        }
+        setPayError('Driver did not accept within 2 minutes. Please choose another driver.')
+        setPayView('driver')
+      }
+    }
+
+    const pollId = window.setInterval(poll, 5000)
+    poll()
+
+    return () => {
+      alive = false
+      window.clearInterval(secondTicker)
+      window.clearInterval(pollId)
+    }
+  }, [payView, pendingRideId, fetchRiderData, handleCancelRide])
+
+  useEffect(() => {
+    if (payView !== 'waiting' || !pendingRideId) return
+    if (typeof window === 'undefined' || !('speechSynthesis' in window)) return
+
+    const speakWaitingMessage = () => {
+      try {
+        window.speechSynthesis.cancel()
+        const utterance = new window.SpeechSynthesisUtterance(
+          'Please wait. Looking for driver acceptance.',
+        )
+        utterance.rate = 1
+        utterance.pitch = 1
+        window.speechSynthesis.speak(utterance)
+        waitingVoiceAtRef.current = Date.now()
+      } catch {
+        /* ignore browser speech synthesis errors */
+      }
+    }
+
+    speakWaitingMessage()
+    const voiceTicker = window.setInterval(() => {
+      speakWaitingMessage()
+    }, 15000)
+
+    return () => {
+      window.clearInterval(voiceTicker)
+      try {
+        window.speechSynthesis.cancel()
+      } catch {
+        /* ignore */
+      }
+    }
+  }, [payView, pendingRideId])
+
+  useEffect(() => {
+    if (payView !== 'waiting' || !pendingRideId || !authToken) return
+
+    const socket = io(import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:3000', {
+      auth: { token: authToken },
+      transports: ['websocket'],
+    })
+
+    socket.on('connect', () => {
+      socket.emit('ride:subscribe', { rideId: pendingRideId })
+    })
+
+    socket.on('ride:progress', (payload) => {
+      if (payload?.rideId !== pendingRideId) return
+      if (payload?.message) {
+        setRealtimeStatusLine(payload.message)
+      }
+    })
+
+    socket.on('ride:status', (payload) => {
+      if (payload?.rideId !== pendingRideId) return
+      if (payload?.status === 'ACCEPTED') {
+        setRealtimeStatusLine('Driver en route to pickup')
+      } else if (payload?.status === 'REQUESTED') {
+        setRealtimeStatusLine('Driver viewed request')
+      }
+    })
+
+    return () => {
+      socket.disconnect()
+    }
+  }, [payView, pendingRideId, authToken])
+
+  const getDriverVisuals = (driver) => {
+    const fallbackDistance = typeof driver.km === 'number' ? driver.km : 2.5
+    const etaMinutes = Math.max(2, Math.round(fallbackDistance * 3.2))
+    const hashBase = `${driver.userId}:${driver.name}`
+    const score = [...hashBase].reduce((acc, ch) => acc + ch.charCodeAt(0), 0)
+    const rating = (4.5 + (score % 5) * 0.1).toFixed(1)
+    const initials = driver.name
+      .split(' ')
+      .map((part) => part[0])
+      .join('')
+      .slice(0, 2)
+      .toUpperCase()
+
+    return { etaMinutes, rating, initials }
   }
 
   const handleBookingFormSubmit = (e) => {
@@ -69,21 +208,48 @@ export default function RiderPage({
       setRiderMessage('Please add pickup and dropoff locations.')
       return
     }
-    setPaymentFareUsd(Math.max(6.5, selectedFareUsd ?? 6.5))
-    setPayView('choose')
-    setStripeClientSecret(null)
+    setPayBusy(true)
     setPayError('')
-    setPaymentModalOpen(true)
+    getNearbyDrivers(authToken, {
+      lat: riderCoords.pickup.lat,
+      lng: riderCoords.pickup.lng,
+    })
+      .then((drivers) => {
+        const list = Array.isArray(drivers) ? drivers : []
+        if (list.length === 0) {
+          throw new Error('No nearby online drivers found for this pickup location.')
+        }
+        setNearbyDrivers(list)
+        setSelectedDriverId(list[0].userId)
+        setPaymentFareUsd(Math.max(6.5, selectedFareUsd ?? 6.5))
+        setPayView('driver')
+        setStripeClientSecret(null)
+        setPayError('')
+        setPaymentModalOpen(true)
+      })
+      .catch((err) => {
+        const message = err?.message || 'Could not load nearby drivers.'
+        setPayError(message)
+        setRiderMessage(message)
+      })
+      .finally(() => {
+        setPayBusy(false)
+      })
   }
 
   const handlePayCash = async () => {
     setPayBusy(true)
     setPayError('')
     try {
-      await confirmRideRequest('CASH')
+      await finalizeRidePayment(pendingRideId, {
+        paymentMethod: 'CASH',
+        fareEstimate: Math.max(6.5, paymentFareUsd ?? 6.5),
+      })
+      await fetchRiderData()
       setPaymentModalOpen(false)
       setBookModalOpen(false)
       resetPaymentModal()
+      setPendingRideId('')
     } catch (err) {
       setPayError(err?.message || 'Could not complete booking.')
     } finally {
@@ -117,13 +283,16 @@ export default function RiderPage({
     setPayBusy(true)
     setPayError('')
     try {
-      await confirmRideRequest('CARD', {
+      await finalizeRidePayment(pendingRideId, {
+        paymentMethod: 'CARD',
         stripePaymentIntentId: paymentIntentId,
-        fareEstimateUsd: locked,
+        fareEstimate: locked,
       })
+      await fetchRiderData()
       setPaymentModalOpen(false)
       setBookModalOpen(false)
       resetPaymentModal()
+      setPendingRideId('')
     } catch (err) {
       setPayError(
         err?.message ||
@@ -725,7 +894,141 @@ export default function RiderPage({
               </button>
             </div>
             <div className="space-y-3 px-5 py-4 text-sm">
-              {payView === 'choose' ? (
+              {payView === 'driver' ? (
+                <>
+                  <p className="text-xs opacity-80">
+                    Select a nearby online driver before payment.
+                  </p>
+                  <div className="max-h-64 space-y-2 overflow-auto pr-1">
+                    {nearbyDrivers.map((driver) => {
+                      const selected = selectedDriverId === driver.userId
+                      const { etaMinutes, rating, initials } = getDriverVisuals(driver)
+                      return (
+                        <button
+                          key={driver.userId}
+                          type="button"
+                          onClick={() => setSelectedDriverId(driver.userId)}
+                          className={`w-full rounded-xl border px-3 py-2.5 text-left transition ${
+                            selected
+                              ? 'border-[#9d3733] bg-[#9d3733]/15'
+                              : darkMode
+                                ? 'border-[#9d3733]/30 hover:bg-[#9d3733]/10'
+                                : 'border-[#9d3733]/20 hover:bg-[#9d3733]/10'
+                          }`}
+                        >
+                          <div className="flex items-start gap-3">
+                            <div
+                              className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-full border text-sm font-bold ${
+                                selected
+                                  ? 'border-[#9d3733] bg-[#9d3733]/20 text-[#9d3733]'
+                                  : darkMode
+                                    ? 'border-[#9d3733]/35 bg-black text-[#f2e3bb]'
+                                    : 'border-[#9d3733]/25 bg-white text-[#842f2b]'
+                              }`}
+                            >
+                              {initials}
+                            </div>
+
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center justify-between gap-2">
+                                <p className="truncate font-semibold">{driver.name}</p>
+                                <span
+                                  className={`shrink-0 rounded-full border px-2 py-0.5 text-[11px] font-bold ${
+                                    darkMode
+                                      ? 'border-[#f2e3bb]/25 bg-[#1a1a1a] text-[#f2e3bb]'
+                                      : 'border-[#9d3733]/25 bg-white text-[#2d100f]'
+                                  }`}
+                                >
+                                  ★ {rating}
+                                </span>
+                              </div>
+                              <p className="mt-0.5 truncate text-xs opacity-80">
+                                {driver.vehicleColor} {driver.vehicleMake} {driver.vehicleModel} ·{' '}
+                                {driver.licensePlate}
+                              </p>
+                              <div className="mt-2 flex flex-wrap gap-1.5">
+                                <span className="rounded-full bg-[#9d3733]/15 px-2 py-0.5 text-[11px] font-semibold text-[#9d3733]">
+                                  ETA {etaMinutes} min
+                                </span>
+                                <span
+                                  className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${
+                                    darkMode
+                                      ? 'bg-[#f2e3bb]/10 text-[#f2e3bb]'
+                                      : 'bg-black/5 text-[#4b2220]'
+                                  }`}
+                                >
+                                  {typeof driver.km === 'number'
+                                    ? `${driver.km.toFixed(1)} km away`
+                                    : 'Nearby'}
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+                        </button>
+                      )
+                    })}
+                  </div>
+                  <button
+                    type="button"
+                    disabled={!selectedDriverId}
+                    onClick={async () => {
+                      try {
+                        setPayBusy(true)
+                        setPayError('')
+                        const ride = await requestPreferredDriver(selectedDriverId)
+                        setPendingRideId(ride.id)
+                        setPayView('waiting')
+                      } catch (error) {
+                        setPayError(error?.message || 'Could not request this driver.')
+                      } finally {
+                        setPayBusy(false)
+                      }
+                    }}
+                    className="w-full rounded-xl bg-[#9d3733] py-3 text-sm font-bold text-[#f2e3bb] transition hover:bg-[#842f2b] disabled:opacity-60"
+                  >
+                    Request this driver
+                  </button>
+                </>
+              ) : payView === 'waiting' ? (
+                <>
+                  <div
+                    className={`rounded-xl border px-3 py-3 text-xs ${
+                      darkMode ? 'border-[#9d3733]/35 bg-black/40' : 'border-[#9d3733]/25 bg-white'
+                    }`}
+                  >
+                    <p className="font-semibold text-[#9d3733]">Waiting for driver acceptance</p>
+                    <p className="mt-1 text-sm">{realtimeStatusLine}</p>
+                    <p className="mt-1 text-sm">
+                      Driver has up to 2 minutes to accept your ride.
+                    </p>
+                    <p className="mt-2 font-bold">
+                      Time left: {Math.floor(waitSecondsLeft / 60)}:
+                      {String(waitSecondsLeft % 60).padStart(2, '0')}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={payBusy}
+                    onClick={async () => {
+                      try {
+                        setPayBusy(true)
+                        await handleCancelRide()
+                        setPayView('driver')
+                        setPayError('Ride request cancelled. Choose another driver.')
+                      } finally {
+                        setPayBusy(false)
+                      }
+                    }}
+                    className={`w-full rounded-xl border-2 py-3 text-sm font-bold transition ${
+                      darkMode
+                        ? 'border-[#9d3733]/60 text-[#f2e3bb] hover:bg-[#9d3733]/15'
+                        : 'border-[#9d3733]/50 text-[#842f2b] hover:bg-[#9d3733]/10'
+                    }`}
+                  >
+                    Cancel and choose another driver
+                  </button>
+                </>
+              ) : payView === 'choose' ? (
                 <>
                   <div
                     className={`rounded-xl border px-3 py-2 text-xs ${
@@ -740,6 +1043,12 @@ export default function RiderPage({
                       Card payments use Stripe (test mode until you go live). Cash is paid to the driver
                       at pickup.
                     </p>
+                    {selectedDriver ? (
+                      <p className="mt-2 text-[11px] font-semibold text-[#9d3733]">
+                        Driver: {selectedDriver.name} ({selectedDriver.vehicleMake}{' '}
+                        {selectedDriver.vehicleModel})
+                      </p>
+                    ) : null}
                   </div>
                   {payError && (
                     <p className="rounded-lg border border-[#9d3733]/40 bg-[#9d3733]/10 px-3 py-2 text-sm text-[#9d3733]">
@@ -778,7 +1087,7 @@ export default function RiderPage({
                     type="button"
                     disabled={payBusy}
                     onClick={() => {
-                      setPayView('choose')
+                      setPayView('driver')
                       setStripeClientSecret(null)
                       setPayError('')
                     }}

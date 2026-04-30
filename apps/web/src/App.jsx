@@ -12,6 +12,7 @@ import {
   loginWithGoogle,
   loginWithPassword,
   registerAccount,
+  setRidePayment,
   updateMe,
 } from './lib/api'
 import AuthModal from './components/AuthModal'
@@ -124,10 +125,16 @@ function App() {
   const mapRef = useRef(null)
   const pickupMarkerRef = useRef(null)
   const dropoffMarkerRef = useRef(null)
+  const riderDriverMarkerRef = useRef(null)
+  const hasDefaultedPickupFromGpsRef = useRef(false)
   const routeOptionsSourceIdRef = useRef('ride-route-options-source')
   const routeOptionsLayerIdRef = useRef('ride-route-options-layer')
   const selectedRouteSourceIdRef = useRef('ride-selected-route-source')
   const selectedRouteLayerIdRef = useRef('ride-selected-route-layer')
+  const driverToPickupSourceIdRef = useRef('driver-to-pickup-source')
+  const driverToPickupLayerIdRef = useRef('driver-to-pickup-layer')
+  const lastRiderVoiceUpdateRef = useRef(0)
+  const hasAnnouncedDriverArrivalRef = useRef(false)
   const hasPromptedGoogleRef = useRef(false)
   const googleClientId = import.meta.env.VITE_GOOGLE_CLIENT_ID ?? ''
   const mapboxAccessToken = import.meta.env.VITE_MAPBOX_ACCESS_TOKEN ?? ''
@@ -699,8 +706,10 @@ function App() {
       ])
       setActiveRide(active)
       setRideHistory(Array.isArray(history) ? history : [])
+      return { active, history }
     } catch (error) {
       setRiderMessage(error.message || 'Unable to load rider data.')
+      return { active: null, history: [] }
     } finally {
       setRiderBusy(false)
     }
@@ -711,6 +720,71 @@ function App() {
       fetchRiderData()
     }
   }, [activePage, authToken, fetchRiderData])
+
+  useEffect(() => {
+    if (activePage !== 'rider' || !authToken) return undefined
+
+    const pollId = window.setInterval(() => {
+      void fetchRiderData()
+    }, 15000)
+
+    return () => window.clearInterval(pollId)
+  }, [activePage, authToken, fetchRiderData])
+
+  useEffect(() => {
+    if (activePage !== 'rider') {
+      hasDefaultedPickupFromGpsRef.current = false
+      return
+    }
+
+    if (!authUser || hasDefaultedPickupFromGpsRef.current) {
+      return
+    }
+
+    if (!navigator.geolocation) {
+      hasDefaultedPickupFromGpsRef.current = true
+      setRiderMessage('Geolocation is not supported in this browser.')
+      return
+    }
+
+    hasDefaultedPickupFromGpsRef.current = true
+    navigator.geolocation.getCurrentPosition(
+      async (position) => {
+        try {
+          const rawPickup = {
+            lat: Number(position.coords.latitude.toFixed(6)),
+            lng: Number(position.coords.longitude.toFixed(6)),
+          }
+          const snappedPickup = await snapToRoad(rawPickup)
+          setRiderCoords((prev) => ({ ...prev, pickup: snappedPickup }))
+
+          if (mapRef.current) {
+            mapRef.current.easeTo({
+              center: [snappedPickup.lng, snappedPickup.lat],
+              duration: 700,
+            })
+          }
+
+          const placeName = await reverseGeocodeRef.current?.(snappedPickup)
+          setRiderForm((prev) => ({
+            ...prev,
+            pickupAddress:
+              placeName ??
+              `${snappedPickup.lat.toFixed(5)}, ${snappedPickup.lng.toFixed(5)}`,
+          }))
+          setRiderMessage('')
+        } catch {
+          setRiderMessage('Could not resolve your pickup address from GPS.')
+        }
+      },
+      () => {
+        setRiderMessage(
+          'Location access denied. Enable GPS permission to auto-fill pickup.',
+        )
+      },
+      { enableHighAccuracy: true, timeout: 12000, maximumAge: 0 },
+    )
+  }, [activePage, authUser, snapToRoad])
 
   useEffect(() => {
     if (activePage === 'driver' && authToken && authUser?.role === 'DRIVER') {
@@ -907,6 +981,7 @@ function App() {
   useEffect(() => {
     if (activePage !== 'rider') {
       setMapWebGlError(null)
+      hasAnnouncedDriverArrivalRef.current = false
       if (mapRef.current) {
         try {
           mapRef.current.remove()
@@ -916,6 +991,7 @@ function App() {
         mapRef.current = null
         pickupMarkerRef.current = null
         dropoffMarkerRef.current = null
+        riderDriverMarkerRef.current = null
       }
     }
   }, [activePage])
@@ -1051,6 +1127,7 @@ function App() {
       mapRef.current = null
       pickupMarkerRef.current = null
       dropoffMarkerRef.current = null
+      riderDriverMarkerRef.current = null
     }
   }, [activePage, mapboxAccessToken, authUser, ensureRouteLayer])
 
@@ -1108,6 +1185,178 @@ function App() {
     coordinates.forEach((coord) => bounds.extend(coord))
     mapRef.current.fitBounds(bounds, { padding: 48, duration: 500, maxZoom: 14 })
   }, [activePage, selectedRouteFeature])
+
+  useEffect(() => {
+    if (!mapRef.current || activePage !== 'rider') return
+    const map = mapRef.current
+
+    const driverLat = activeRide?.driver?.driverProfile?.currentLat
+    const driverLng = activeRide?.driver?.driverProfile?.currentLng
+    const hasDriverCoords =
+      typeof driverLat === 'number' &&
+      Number.isFinite(driverLat) &&
+      typeof driverLng === 'number' &&
+      Number.isFinite(driverLng)
+
+    const source = map.getSource(driverToPickupSourceIdRef.current)
+    if (!hasDriverCoords) {
+      hasAnnouncedDriverArrivalRef.current = false
+      if (riderDriverMarkerRef.current) {
+        riderDriverMarkerRef.current.remove()
+        riderDriverMarkerRef.current = null
+      }
+      if (source) {
+        source.setData({ type: 'FeatureCollection', features: [] })
+      }
+      return
+    }
+
+    if (!riderDriverMarkerRef.current) {
+      const carIconEl = document.createElement('div')
+      carIconEl.className = 'flex h-8 w-8 items-center justify-center rounded-full border border-white/80 bg-[#22c55e] text-lg shadow-md'
+      carIconEl.textContent = '🚗'
+      riderDriverMarkerRef.current = new mapboxgl.Marker({ element: carIconEl })
+        .setLngLat([driverLng, driverLat])
+        .addTo(map)
+    } else {
+      riderDriverMarkerRef.current.setLngLat([driverLng, driverLat])
+    }
+
+    const shouldShowIncomingRoute =
+      activeRide?.status === 'ACCEPTED' || activeRide?.status === 'STARTED'
+    const emptyRoute = { type: 'FeatureCollection', features: [] }
+
+    const now = Date.now()
+    if (
+      shouldShowIncomingRoute &&
+      now - lastRiderVoiceUpdateRef.current >= 15000 &&
+      typeof window !== 'undefined' &&
+      'speechSynthesis' in window
+    ) {
+      try {
+        window.speechSynthesis.cancel()
+        const utterance = new window.SpeechSynthesisUtterance(
+          'Your driver is coming to pick you up.',
+        )
+        utterance.rate = 1
+        utterance.pitch = 1
+        window.speechSynthesis.speak(utterance)
+        lastRiderVoiceUpdateRef.current = now
+      } catch {
+        /* ignore speech synthesis errors */
+      }
+    }
+
+    const distanceToPickupKm = (() => {
+      const toRadians = (value) => (value * Math.PI) / 180
+      const earthRadiusKm = 6371
+      const dLat = toRadians(activeRide.pickupLat - driverLat)
+      const dLng = toRadians(activeRide.pickupLng - driverLng)
+      const a =
+        Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+        Math.cos(toRadians(driverLat)) *
+          Math.cos(toRadians(activeRide.pickupLat)) *
+          Math.sin(dLng / 2) *
+          Math.sin(dLng / 2)
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+      return earthRadiusKm * c
+    })()
+
+    if (distanceToPickupKm <= 0.1 && !hasAnnouncedDriverArrivalRef.current) {
+      hasAnnouncedDriverArrivalRef.current = true
+      setRiderMessage('Your driver has reached your pickup location.')
+      if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+        try {
+          window.speechSynthesis.cancel()
+          const utterance = new window.SpeechSynthesisUtterance(
+            'Your driver has arrived at your pickup location.',
+          )
+          utterance.rate = 1
+          utterance.pitch = 1
+          window.speechSynthesis.speak(utterance)
+        } catch {
+          /* ignore speech synthesis errors */
+        }
+      }
+    } else if (distanceToPickupKm > 0.1) {
+      hasAnnouncedDriverArrivalRef.current = false
+    }
+
+    const ensureLayer = (routeData) => {
+      if (!map.getSource(driverToPickupSourceIdRef.current)) {
+        map.addSource(driverToPickupSourceIdRef.current, {
+          type: 'geojson',
+          data: routeData,
+        })
+      } else {
+        map.getSource(driverToPickupSourceIdRef.current).setData(routeData)
+      }
+
+      if (!map.getLayer(driverToPickupLayerIdRef.current)) {
+        map.addLayer({
+          id: driverToPickupLayerIdRef.current,
+          type: 'line',
+          source: driverToPickupSourceIdRef.current,
+          layout: { 'line-cap': 'round', 'line-join': 'round' },
+          paint: {
+            'line-color': '#22c55e',
+            'line-width': 4,
+            'line-opacity': 0.9,
+          },
+        })
+      }
+    }
+
+    const drawDriverRoute = async () => {
+      if (!shouldShowIncomingRoute) {
+        if (map.isStyleLoaded()) {
+          ensureLayer(emptyRoute)
+        } else {
+          map.once('style.load', () => ensureLayer(emptyRoute))
+        }
+        return
+      }
+
+      try {
+        const response = await fetch(
+          `https://api.mapbox.com/directions/v5/mapbox/driving/${driverLng},${driverLat};${activeRide.pickupLng},${activeRide.pickupLat}?geometries=geojson&overview=full&steps=false&alternatives=false&access_token=${mapboxAccessToken}`,
+        )
+        if (!response.ok) {
+          if (map.isStyleLoaded()) ensureLayer(emptyRoute)
+          return
+        }
+        const data = await response.json()
+        const coords = data?.routes?.[0]?.geometry?.coordinates
+        if (!Array.isArray(coords) || coords.length < 2) {
+          if (map.isStyleLoaded()) ensureLayer(emptyRoute)
+          return
+        }
+
+        const routeData = {
+          type: 'FeatureCollection',
+          features: [
+            {
+              type: 'Feature',
+              geometry: {
+                type: 'LineString',
+                coordinates: coords,
+              },
+            },
+          ],
+        }
+
+        if (map.isStyleLoaded()) {
+          ensureLayer(routeData)
+        } else {
+          map.once('style.load', () => ensureLayer(routeData))
+        }
+      } catch {
+        if (map.isStyleLoaded()) ensureLayer(emptyRoute)
+      }
+    }
+
+    void drawDriverRoute()
+  }, [activePage, activeRide, mapboxAccessToken])
 
   useEffect(() => {
     if (activePage !== 'rider' || !mapRef.current) return
@@ -1184,80 +1433,41 @@ function App() {
     setShowHomeDropoffSuggestions(false)
   }, [])
 
-  const confirmRideRequest = useCallback(
-    async (paymentMethod, options = {}) => {
-      if (!authToken) return
+  const requestPreferredDriver = useCallback(
+    async (preferredDriverId) => {
+      if (!authToken) throw new Error('Sign in required')
+      if (!preferredDriverId) throw new Error('Please select a driver')
       if (!riderForm.pickupAddress.trim() || !riderForm.dropoffAddress.trim()) {
-        setRiderMessage('Please add pickup and dropoff locations.')
-        return
+        throw new Error('Please add pickup and dropoff locations.')
       }
 
-      const fareEstimate =
-        typeof options.fareEstimateUsd === 'number' && !Number.isNaN(options.fareEstimateUsd)
-          ? options.fareEstimateUsd
-          : routeOptions[selectedRouteIndex]?.priceUsd
+      let nextPickup = riderCoords.pickup
+      let nextDropoff = riderCoords.dropoff
+      const [pickupMatch, dropoffMatch] = await Promise.all([
+        resolveLocationFromQuery(riderForm.pickupAddress),
+        resolveLocationFromQuery(riderForm.dropoffAddress),
+      ])
+      if (pickupMatch?.coords) nextPickup = pickupMatch.coords
+      if (dropoffMatch?.coords) nextDropoff = dropoffMatch.coords
+      ;[nextPickup, nextDropoff] = await Promise.all([
+        snapToRoad(nextPickup),
+        snapToRoad(nextDropoff),
+      ])
 
-      if (paymentMethod === 'CARD' && (fareEstimate == null || Number.isNaN(fareEstimate))) {
-        setRiderMessage('Fare estimate is required for card payment. Select a route first.')
-        return
-      }
-
-      try {
-        setRiderBusy(true)
-        setRiderMessage('')
-        let nextPickup = riderCoords.pickup
-        let nextDropoff = riderCoords.dropoff
-
-        const [pickupMatch, dropoffMatch] = await Promise.all([
-          resolveLocationFromQuery(riderForm.pickupAddress),
-          resolveLocationFromQuery(riderForm.dropoffAddress),
-        ])
-
-        if (pickupMatch?.coords) {
-          nextPickup = pickupMatch.coords
-        }
-        if (dropoffMatch?.coords) {
-          nextDropoff = dropoffMatch.coords
-        }
-        ;[nextPickup, nextDropoff] = await Promise.all([
-          snapToRoad(nextPickup),
-          snapToRoad(nextDropoff),
-        ])
-
-        setRiderCoords({
-          pickup: nextPickup,
-          dropoff: nextDropoff,
-        })
-
-        if (!pickupMatch || !dropoffMatch) {
-          setRiderMessage('Choose locations from suggestions to get the best drivable routes.')
-        }
-
-        const payload = {
-          pickupAddress: riderForm.pickupAddress.trim(),
-          dropoffAddress: riderForm.dropoffAddress.trim(),
-          pickupLat: nextPickup.lat,
-          pickupLng: nextPickup.lng,
-          dropoffLat: nextDropoff.lat,
-          dropoffLng: nextDropoff.lng,
-          ...(fareEstimate != null ? { fareEstimate } : {}),
-          paymentMethod,
-          paymentStatus: 'COMPLETED',
-          ...(options.stripePaymentIntentId
-            ? { stripePaymentIntentId: options.stripePaymentIntentId }
-            : {}),
-        }
-
-        await createRide(authToken, payload)
-        setRiderMessage('Ride request submitted successfully.')
-        await fetchRiderData()
-      } catch (error) {
-        const msg = error.message || 'Unable to request ride.'
-        setRiderMessage(msg)
-        throw error
-      } finally {
-        setRiderBusy(false)
-      }
+      setRiderCoords({ pickup: nextPickup, dropoff: nextDropoff })
+      const fareEstimate = routeOptions[selectedRouteIndex]?.priceUsd
+      return createRide(authToken, {
+        pickupAddress: riderForm.pickupAddress.trim(),
+        dropoffAddress: riderForm.dropoffAddress.trim(),
+        pickupLat: nextPickup.lat,
+        pickupLng: nextPickup.lng,
+        dropoffLat: nextDropoff.lat,
+        dropoffLng: nextDropoff.lng,
+        ...(fareEstimate != null ? { fareEstimate } : {}),
+        preferredDriverId,
+        paymentMethod: 'CASH',
+        paymentStatus: 'PENDING',
+      })
     },
     [
       authToken,
@@ -1265,12 +1475,19 @@ function App() {
       riderForm.dropoffAddress,
       riderCoords.pickup,
       riderCoords.dropoff,
+      resolveLocationFromQuery,
       routeOptions,
       selectedRouteIndex,
-      fetchRiderData,
-      resolveLocationFromQuery,
       snapToRoad,
     ],
+  )
+
+  const finalizeRidePayment = useCallback(
+    async (rideId, paymentPayload) => {
+      if (!authToken) throw new Error('Sign in required')
+      return setRidePayment(authToken, rideId, paymentPayload)
+    },
+    [authToken],
   )
 
   return (
@@ -1652,7 +1869,8 @@ function App() {
           fetchRiderData={fetchRiderData}
           activeRide={activeRide}
           rideHistory={rideHistory}
-          confirmRideRequest={confirmRideRequest}
+          requestPreferredDriver={requestPreferredDriver}
+          finalizeRidePayment={finalizeRidePayment}
           setRiderMessage={setRiderMessage}
           handleCancelRide={handleCancelRide}
           navigateToPage={navigateToPage}
