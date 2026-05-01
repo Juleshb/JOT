@@ -64,6 +64,9 @@ model DriverProfile {
   isOnline           Boolean                  @default(false)
   currentLat         Float?
   currentLng         Float?
+  /** Average of rider star ratings (1–5) on completed rides; null until at least one rating. */
+  averageRiderRating Float?
+  riderRatingCount   Int                      @default(0)
   updatedAt          DateTime                 @updatedAt
 }
 
@@ -91,7 +94,19 @@ model Ride {
   completedAt    DateTime?
   cancelledAt    DateTime?
 
+  /** Populated after the rider submits a post-trip rating (see `RideRating`). */
+  rating RideRating?
+
   @@index([riderId, status])
   @@index([driverId, status])
   @@index([status, createdAt])
+}
+
+/** Rider’s 1–5 star rating for a completed ride (one row per ride). */
+model RideRating {
+  id        String   @id @default(cuid())
+  rideId    String   @unique
+  ride      Ride     @relation(fields: [rideId], references: [id], onDelete: Cascade)
+  stars     Int
+  createdAt DateTime @default(now())
 }

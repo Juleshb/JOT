@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from 'react'
 import { io } from 'socket.io-client'
 import { formatDurationHoursMinutes } from '../lib/formatDuration'
 import { formatUsd } from '../lib/estimateFare'
-import { createRidePaymentIntent, getNearbyDrivers } from '../lib/api'
+import { createRidePaymentIntent, getNearbyDrivers, rateRide } from '../lib/api'
+import MapViewControls from '../components/MapViewControls'
 import { StripeRidePayment, stripePublishableConfigured } from '../components/StripeRidePayment'
 
 export default function RiderPage({
@@ -38,8 +39,15 @@ export default function RiderPage({
   setRiderMessage,
   handleCancelRide,
   navigateToPage,
+  riderBasemapMode,
+  setRiderBasemapMode,
+  riderTrafficOn,
+  setRiderTrafficOn,
+  onOpenStreetView,
 }) {
   const MAP_VIEW_STORAGE_KEY = 'jo-ride-map-view'
+  /** Drivers at or beyond this distance (km) get a non-blocking “far” warning. */
+  const FAR_DRIVER_KM_THRESHOLD = 8
 
   const [bookModalOpen, setBookModalOpen] = useState(false)
   const [paymentModalOpen, setPaymentModalOpen] = useState(false)
@@ -59,8 +67,17 @@ export default function RiderPage({
     if (typeof window === 'undefined') return 'driver'
     return window.localStorage.getItem(MAP_VIEW_STORAGE_KEY) === 'classic' ? 'classic' : 'driver'
   })
+  const [ratingStarsDraft, setRatingStarsDraft] = useState(0)
+  const [ratingBusy, setRatingBusy] = useState(false)
+  /** After submit: show congratulations until dismissed (`rating` = saved `RideRating` row). */
+  const [ratingThanks, setRatingThanks] = useState(null)
 
   const isDriverMapView = mapViewMode === 'driver'
+
+  const needsRiderRating =
+    activeRide?.status === 'COMPLETED' &&
+    !activeRide?.rating &&
+    Boolean(activeRide.driverId)
 
   const selectedFareUsd = routeOptions[selectedRouteIndex]?.priceUsd ?? null
 
@@ -195,6 +212,9 @@ export default function RiderPage({
 
     socket.on('ride:status', (payload) => {
       if (payload?.rideId !== pendingRideId) return
+      if (payload?.ride) {
+        void fetchRiderData()
+      }
       if (payload?.status === 'ACCEPTED') {
         setRealtimeStatusLine('Driver en route to pickup')
       } else if (payload?.status === 'REQUESTED') {
@@ -205,14 +225,25 @@ export default function RiderPage({
     return () => {
       socket.disconnect()
     }
-  }, [payView, pendingRideId, authToken])
+  }, [payView, pendingRideId, authToken, fetchRiderData])
+
+  useEffect(() => {
+    setRatingStarsDraft(0)
+  }, [activeRide?.id])
+
+  const isFarDriver = (driver) =>
+    typeof driver.km === 'number' && driver.km >= FAR_DRIVER_KM_THRESHOLD
 
   const getDriverVisuals = (driver) => {
     const fallbackDistance = typeof driver.km === 'number' ? driver.km : 2.5
     const etaMinutes = Math.max(2, Math.round(fallbackDistance * 3.2))
     const hashBase = `${driver.userId}:${driver.name}`
     const score = [...hashBase].reduce((acc, ch) => acc + ch.charCodeAt(0), 0)
-    const rating = (4.5 + (score % 5) * 0.1).toFixed(1)
+    const synthetic = (4.5 + (score % 5) * 0.1).toFixed(1)
+    const rating =
+      typeof driver.averageRiderRating === 'number' && Number.isFinite(driver.averageRiderRating)
+        ? driver.averageRiderRating.toFixed(1)
+        : synthetic
     const initials = driver.name
       .split(' ')
       .map((part) => part[0])
@@ -338,7 +369,7 @@ export default function RiderPage({
   }, [mapViewMode])
 
   const suggestionPanelClass = (darkMode) =>
-    `absolute left-0 right-0 top-full z-30 mt-1 max-h-48 overflow-auto rounded-lg border text-xs shadow-lg ${
+    `absolute left-0 right-0 top-full z-30 mt-1 max-h-64 overflow-auto rounded-lg border text-xs shadow-lg sm:max-h-72 ${
       darkMode ? 'border-[#9d3733]/40 bg-black' : 'border-[#9d3733]/25 bg-white'
     }`
 
@@ -367,7 +398,7 @@ export default function RiderPage({
         </label>
         <input
           type="text"
-          placeholder="Where should we pick you up?"
+          placeholder="Search any address — nearby results shown first"
           value={riderForm.pickupAddress}
           onChange={(e) => handleRiderLocationInput('pickup', e.target.value)}
           onFocus={() => setShowPickupSuggestions(true)}
@@ -393,11 +424,18 @@ export default function RiderPage({
                       : 'border-[#9d3733]/15 hover:bg-[#9d3733]/10'
                   }`}
                 >
-                  {suggestion.placeName}
+                  {suggestion.badge ? (
+                    <span className="mb-0.5 block text-[10px] font-bold uppercase tracking-wide text-[#15803d]">
+                      {suggestion.badge}
+                    </span>
+                  ) : null}
+                  <span className="text-[13px] leading-snug sm:text-sm">{suggestion.placeName}</span>
                 </button>
               ))
             ) : (
-              <p className="px-3 py-2 opacity-70">Type 3+ letters to see locations.</p>
+              <p className="px-3 py-2 opacity-70">
+                Nearby places appear here, or type at least 3 letters to search worldwide.
+              </p>
             )}
           </div>
         )}
@@ -413,7 +451,7 @@ export default function RiderPage({
         </label>
         <input
           type="text"
-          placeholder="Where are you going?"
+          placeholder="Destination — biased from your pickup"
           value={riderForm.dropoffAddress}
           onChange={(e) => handleRiderLocationInput('dropoff', e.target.value)}
           onFocus={() => setShowDropoffSuggestions(true)}
@@ -439,11 +477,18 @@ export default function RiderPage({
                       : 'border-[#9d3733]/15 hover:bg-[#9d3733]/10'
                   }`}
                 >
-                  {suggestion.placeName}
+                  {suggestion.badge ? (
+                    <span className="mb-0.5 block text-[10px] font-bold uppercase tracking-wide text-[#15803d]">
+                      {suggestion.badge}
+                    </span>
+                  ) : null}
+                  <span className="text-[13px] leading-snug sm:text-sm">{suggestion.placeName}</span>
                 </button>
               ))
             ) : (
-              <p className="px-3 py-2 opacity-70">Type 3+ letters to see locations.</p>
+              <p className="px-3 py-2 opacity-70">
+                Places near your pickup appear here, or type 3+ letters to search anywhere.
+              </p>
             )}
           </div>
         )}
@@ -508,8 +553,12 @@ export default function RiderPage({
             darkMode ? 'border-[#9d3733]/35 bg-black/60' : 'border-[#9d3733]/20 bg-white'
           }`}
         >
-          <p className="px-1 pb-1 text-xs font-semibold text-[#9d3733]">
-            Possible routes · est. fare (USD)
+          <p className="px-1 pb-0.5 text-xs font-semibold text-[#9d3733]">
+            Driving routes (cars) · pick one · est. fare (USD)
+          </p>
+          <p className="px-1 pb-2 text-[10px] leading-snug opacity-80">
+            Roads follow Mapbox driving data. Tap a route to use it. Addresses below list main streets
+            along that path.
           </p>
           <div className="space-y-1">
             {routeOptions.map((option, index) => (
@@ -517,8 +566,8 @@ export default function RiderPage({
                 key={option.id}
                 type="button"
                 onClick={() => setSelectedRouteIndex(index)}
-                title={option.summaryLine || option.name}
-                className={`flex w-full items-start gap-2 rounded-lg px-3 py-2.5 text-left text-xs transition ${
+                title={option.roadsLine || option.summaryLine || option.name}
+                className={`flex w-full flex-col gap-1 rounded-lg px-3 py-2.5 text-left text-xs transition ${
                   selectedRouteIndex === index
                     ? 'bg-[#9d3733] text-[#f2e3bb]'
                     : darkMode
@@ -526,28 +575,40 @@ export default function RiderPage({
                       : 'hover:bg-[#9d3733]/10'
                 }`}
               >
-                <span className="min-w-0 flex-1 font-semibold leading-snug">
-                  {option.name || `Option ${index + 1}`}
-                </span>
-                <span className="shrink-0 text-right leading-snug">
-                  {formatUsd(option.priceUsd) ? (
-                    <span
-                      className={`mb-1 block text-sm font-bold ${
-                        selectedRouteIndex === index
-                          ? 'text-[#f2e3bb]'
-                          : 'text-[#9d3733]'
-                      }`}
-                    >
-                      {formatUsd(option.priceUsd)}
+                <div className="flex w-full items-start gap-2">
+                  <span className="min-w-0 flex-1 font-semibold leading-snug">
+                    {option.name || `Option ${index + 1}`}
+                  </span>
+                  <span className="shrink-0 text-right leading-snug">
+                    {formatUsd(option.priceUsd) ? (
+                      <span
+                        className={`mb-1 block text-sm font-bold ${
+                          selectedRouteIndex === index
+                            ? 'text-[#f2e3bb]'
+                            : 'text-[#9d3733]'
+                        }`}
+                      >
+                        {formatUsd(option.priceUsd)}
+                      </span>
+                    ) : null}
+                    <span className="block text-[11px] opacity-90">
+                      {formatDurationHoursMinutes(option.durationMinutes) ?? 'ETA N/A'}
                     </span>
-                  ) : null}
-                  <span className="block text-[11px] opacity-90">
-                    {formatDurationHoursMinutes(option.durationMinutes) ?? 'ETA N/A'}
+                    <span className="block text-[11px] opacity-90">
+                      {option.distanceKm ? `${option.distanceKm} km` : '—'}
+                    </span>
                   </span>
-                  <span className="block text-[11px] opacity-90">
-                    {option.distanceKm ? `${option.distanceKm} km` : '—'}
-                  </span>
-                </span>
+                </div>
+                {option.roadsLine ? (
+                  <p
+                    className={`w-full pl-0 text-[10px] leading-relaxed opacity-90 ${
+                      selectedRouteIndex === index ? 'text-[#f2e3bb]/95' : ''
+                    }`}
+                  >
+                    <span className="font-bold opacity-100">Streets: </span>
+                    {option.roadsLine}
+                  </p>
+                ) : null}
               </button>
             ))}
           </div>
@@ -564,11 +625,76 @@ export default function RiderPage({
     </div>
   )
 
-  const driverStatusLabel = activeRide
-    ? `On trip · ${activeRide.status}`
-    : isDriverMapView
-      ? 'Driver view · full map, then book'
-      : 'Classic view · map + form side by side (desktop)'
+  const handleSubmitDriverRating = async () => {
+    if (!authToken || !activeRide?.id || ratingStarsDraft < 1 || ratingStarsDraft > 5) return
+    setRatingBusy(true)
+    setRiderMessage('')
+    const submittedStars = ratingStarsDraft
+    const driverName = activeRide.driver?.name ?? null
+    try {
+      const ratedRide = await rateRide(authToken, activeRide.id, submittedStars)
+      const r = ratedRide?.rating
+      setRatingThanks({
+        stars: submittedStars,
+        driverName,
+        ratedAt: r?.createdAt ?? null,
+      })
+      await fetchRiderData()
+    } catch (e) {
+      setRiderMessage(e?.message || 'Could not save your rating.')
+    } finally {
+      setRatingBusy(false)
+    }
+  }
+
+  const driverStatusLabel = needsRiderRating
+    ? 'Trip complete · rate your driver'
+    : activeRide
+      ? `On trip · ${activeRide.status}`
+      : isDriverMapView
+        ? 'Driver view · full map, then book'
+        : 'Classic view · map + form side by side (desktop)'
+
+  const renderRatingCard = () => (
+    <div
+      className={`w-full max-w-[min(100%,22rem)] rounded-2xl border px-4 py-3 shadow-xl backdrop-blur-md ${
+        darkMode
+          ? 'border-[#9d3733]/50 bg-black/80 text-[#f2e3bb]'
+          : 'border-[#9d3733]/35 bg-white/95 text-[#2d100f]'
+      }`}
+      role="region"
+      aria-label="Rate your driver"
+    >
+      <p className="text-center text-sm font-bold leading-snug">
+        How was your trip{activeRide.driver?.name ? ` with ${activeRide.driver.name}` : ''}?
+      </p>
+      <div className="mt-2 flex justify-center gap-1.5" role="group" aria-label="Star rating">
+        {[1, 2, 3, 4, 5].map((n) => (
+          <button
+            key={n}
+            type="button"
+            disabled={ratingBusy}
+            aria-label={`${n} star${n > 1 ? 's' : ''}`}
+            aria-pressed={ratingStarsDraft === n}
+            onClick={() => setRatingStarsDraft(n)}
+            className={`rounded-lg px-1.5 py-1 text-2xl leading-none transition disabled:opacity-50 ${
+              ratingStarsDraft >= n ? 'text-amber-400' : darkMode ? 'text-[#f2e3bb]/25' : 'text-[#2d100f]/20'
+            }`}
+          >
+            ★
+          </button>
+        ))}
+      </div>
+      <button
+        type="button"
+        disabled={ratingBusy || ratingStarsDraft < 1}
+        onClick={handleSubmitDriverRating}
+        className="font-accent mt-3 w-full rounded-xl bg-[#9d3733] py-2.5 text-sm font-bold text-[#f2e3bb] transition hover:bg-[#842f2b] disabled:opacity-50"
+      >
+        {ratingBusy ? 'Saving…' : 'Submit rating'}
+      </button>
+    </div>
+  )
 
   return (
     <section className="mx-auto w-full max-w-[1700px] px-4 pb-14 pt-24 sm:px-6 md:pt-28">
@@ -592,6 +718,51 @@ export default function RiderPage({
                 ×
               </button>
             </div>
+          </div>
+        </div>
+      )}
+      {ratingThanks && (
+        <div
+          className="fixed inset-0 z-[160] flex items-center justify-center p-4"
+          role="presentation"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) setRatingThanks(null)
+          }}
+        >
+          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" aria-hidden />
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="rating-thanks-title"
+            className={`relative z-10 w-full max-w-md rounded-2xl border px-6 py-8 text-center shadow-2xl ${
+              darkMode
+                ? 'border-[#9d3733]/50 bg-[#111] text-[#f2e3bb]'
+                : 'border-[#9d3733]/35 bg-[#fff8eb] text-[#2d100f]'
+            }`}
+          >
+            <p className="font-accent text-2xl font-bold text-[#9d3733]" id="rating-thanks-title">
+              Congratulations!
+            </p>
+            <p className="mt-4 text-base leading-relaxed">
+              Thank you for working with us — we are glad you chose JOT for your trip.
+            </p>
+            <p className="mt-3 text-sm opacity-90">
+              You rated{' '}
+              <span className="font-semibold">{ratingThanks.driverName ?? 'your driver'}</span> with{' '}
+              <span className="font-semibold text-amber-400">{ratingThanks.stars}★</span>.
+            </p>
+            {ratingThanks.ratedAt && (
+              <p className="mt-4 text-xs opacity-75">
+                Trip rating saved · {new Date(ratingThanks.ratedAt).toLocaleString()}
+              </p>
+            )}
+            <button
+              type="button"
+              className="font-accent mt-6 w-full rounded-xl bg-[#9d3733] py-3 text-base font-bold text-[#f2e3bb] transition hover:bg-[#842f2b]"
+              onClick={() => setRatingThanks(null)}
+            >
+              Continue
+            </button>
           </div>
         </div>
       )}
@@ -694,7 +865,7 @@ export default function RiderPage({
                       } w-full`
                 }`}
               >
-                <div className="pointer-events-none absolute inset-x-0 top-0 z-20 flex justify-center px-3 pt-3 xl:pt-4">
+                <div className="pointer-events-none absolute inset-x-0 top-0 z-20 flex flex-col items-center gap-2 px-3 pt-3 xl:pt-4">
                   <div
                     className={`pointer-events-auto max-w-[min(100%,28rem)] truncate rounded-2xl border px-4 py-2.5 text-center text-xs font-semibold shadow-lg backdrop-blur-md sm:text-sm ${
                       darkMode
@@ -704,6 +875,23 @@ export default function RiderPage({
                   >
                     {driverStatusLabel}
                   </div>
+                  {mapboxAccessToken && !mapWebGlError ? (
+                    <MapViewControls
+                      darkMode={darkMode}
+                      basemapMode={riderBasemapMode}
+                      onBasemapModeChange={setRiderBasemapMode}
+                      trafficOn={riderTrafficOn}
+                      onTrafficToggle={setRiderTrafficOn}
+                      onStreetView={onOpenStreetView}
+                      disabled={!authUser}
+                      className="pointer-events-auto w-full max-w-[min(100%,36rem)] px-0"
+                    />
+                  ) : null}
+                  {needsRiderRating ? (
+                    <div className="pointer-events-auto flex w-full max-w-[min(100%,22rem)] justify-center xl:hidden">
+                      {renderRatingCard()}
+                    </div>
+                  ) : null}
                 </div>
                 {mapWebGlError ? (
                   <div
@@ -738,20 +926,22 @@ export default function RiderPage({
               </div>
             </div>
 
-            <button
-              type="button"
-              onClick={() => setBookModalOpen(true)}
-              className={`fixed bottom-5 left-4 right-4 z-40 flex items-center justify-center gap-2 rounded-2xl py-4 text-base font-bold shadow-xl transition active:scale-[0.98] xl:hidden ${
-                darkMode
-                  ? 'bg-[#9d3733] text-[#f2e3bb] shadow-black/40'
-                  : 'bg-[#9d3733] text-[#f2e3bb] shadow-[#9d3733]/30'
-              }`}
-            >
-              <span>Book your ride</span>
-              <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M5 12h14M12 5l7 7-7 7" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-            </button>
+            {!needsRiderRating && (
+              <button
+                type="button"
+                onClick={() => setBookModalOpen(true)}
+                className={`fixed bottom-5 left-4 right-4 z-40 flex items-center justify-center gap-2 rounded-2xl py-4 text-base font-bold shadow-xl transition active:scale-[0.98] xl:hidden ${
+                  darkMode
+                    ? 'bg-[#9d3733] text-[#f2e3bb] shadow-black/40'
+                    : 'bg-[#9d3733] text-[#f2e3bb] shadow-[#9d3733]/30'
+                }`}
+              >
+                <span>Book your ride</span>
+                <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M5 12h14M12 5l7 7-7 7" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </button>
+            )}
 
             {bookModalOpen && (
               <div
@@ -824,38 +1014,62 @@ export default function RiderPage({
               {riderBusy ? (
                 <p className="text-sm opacity-80">Loading rider details...</p>
               ) : activeRide ? (
-                <div className="space-y-2 text-sm">
-                  <p>
-                    <span className="font-bold">Status:</span> {activeRide.status}
-                  </p>
-                  <p>
-                    <span className="font-bold">From:</span> {activeRide.pickupAddress}
-                  </p>
-                  <p>
-                    <span className="font-bold">To:</span> {activeRide.dropoffAddress}
-                  </p>
-                  <p>
-                    <span className="font-bold">Fare estimate:</span>{' '}
-                    {typeof activeRide.fareEstimate === 'number'
-                      ? formatUsd(activeRide.fareEstimate)
-                      : (activeRide.fareEstimate ?? 'N/A')}
-                  </p>
-                  {activeRide.paymentMethod != null && (
-                    <p>
-                      <span className="font-bold">Payment:</span>{' '}
-                      {activeRide.paymentMethod === 'CARD' ? 'Card / digital wallet' : 'Cash on pickup'}{' '}
-                      <span className="opacity-75">({activeRide.paymentStatus})</span>
+                needsRiderRating ? (
+                  <div className="space-y-3 text-sm">
+                    <p className="font-semibold leading-snug">
+                      Trip finished. Please rate your driver before booking your next ride.
                     </p>
-                  )}
-                  <button
-                    type="button"
-                    onClick={handleCancelRide}
-                    disabled={riderBusy}
-                    className="mt-2 rounded-lg bg-[#9d3733] px-4 py-2 text-sm font-bold text-[#f2e3bb] transition hover:bg-[#842f2b] disabled:opacity-60"
-                  >
-                    Cancel active ride
-                  </button>
-                </div>
+                    <p>
+                      <span className="font-bold">Driver:</span> {activeRide.driver?.name ?? '—'}
+                    </p>
+                    <p>
+                      <span className="font-bold">Route:</span> {activeRide.pickupAddress} →{' '}
+                      {activeRide.dropoffAddress}
+                    </p>
+                    {typeof activeRide.fareFinal === 'number' && (
+                      <p>
+                        <span className="font-bold">Fare:</span> {formatUsd(activeRide.fareFinal)}
+                      </p>
+                    )}
+                    <div className="hidden xl:block">{renderRatingCard()}</div>
+                    <p className="text-xs opacity-80 xl:hidden">
+                      Use the star rating on the map above to rate your driver.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-2 text-sm">
+                    <p>
+                      <span className="font-bold">Status:</span> {activeRide.status}
+                    </p>
+                    <p>
+                      <span className="font-bold">From:</span> {activeRide.pickupAddress}
+                    </p>
+                    <p>
+                      <span className="font-bold">To:</span> {activeRide.dropoffAddress}
+                    </p>
+                    <p>
+                      <span className="font-bold">Fare estimate:</span>{' '}
+                      {typeof activeRide.fareEstimate === 'number'
+                        ? formatUsd(activeRide.fareEstimate)
+                        : (activeRide.fareEstimate ?? 'N/A')}
+                    </p>
+                    {activeRide.paymentMethod != null && (
+                      <p>
+                        <span className="font-bold">Payment:</span>{' '}
+                        {activeRide.paymentMethod === 'CARD' ? 'Card / digital wallet' : 'Cash on pickup'}{' '}
+                        <span className="opacity-75">({activeRide.paymentStatus})</span>
+                      </p>
+                    )}
+                    <button
+                      type="button"
+                      onClick={handleCancelRide}
+                      disabled={riderBusy}
+                      className="mt-2 rounded-lg bg-[#9d3733] px-4 py-2 text-sm font-bold text-[#f2e3bb] transition hover:bg-[#842f2b] disabled:opacity-60"
+                    >
+                      Cancel active ride
+                    </button>
+                  </div>
+                )
               ) : (
                 <p className="text-sm opacity-80">No active ride right now.</p>
               )}
@@ -887,6 +1101,16 @@ export default function RiderPage({
                       <p>
                         <span className="font-bold">To:</span> {ride.dropoffAddress}
                       </p>
+                      {ride.rating && typeof ride.rating.stars === 'number' && (
+                        <p>
+                          <span className="font-bold">Your rating:</span> {ride.rating.stars}★
+                          {ride.rating.createdAt && (
+                            <span className="ml-1 text-[11px] font-normal opacity-75">
+                              · {new Date(ride.rating.createdAt).toLocaleString()}
+                            </span>
+                          )}
+                        </p>
+                      )}
                     </article>
                   ))}
                 </div>
@@ -954,6 +1178,7 @@ export default function RiderPage({
                     {nearbyDrivers.map((driver) => {
                       const selected = selectedDriverId === driver.userId
                       const { etaMinutes, rating, initials } = getDriverVisuals(driver)
+                      const far = isFarDriver(driver)
                       return (
                         <button
                           key={driver.userId}
@@ -1012,6 +1237,18 @@ export default function RiderPage({
                                     ? `${driver.km.toFixed(1)} km away`
                                     : 'Nearby'}
                                 </span>
+                                {far ? (
+                                  <span
+                                    className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold leading-tight ${
+                                      darkMode
+                                        ? 'border-amber-400/45 bg-amber-500/15 text-amber-200'
+                                        : 'border-amber-600/35 bg-amber-50 text-amber-900'
+                                    }`}
+                                    title="This driver is far, ETA may be longer."
+                                  >
+                                    Far · longer ETA
+                                  </span>
+                                ) : null}
                               </div>
                             </div>
                           </div>
@@ -1019,6 +1256,18 @@ export default function RiderPage({
                       )
                     })}
                   </div>
+                  {selectedDriver && isFarDriver(selectedDriver) ? (
+                    <div
+                      className={`rounded-xl border px-3 py-2 text-xs font-semibold ${
+                        darkMode
+                          ? 'border-amber-400/40 bg-amber-500/10 text-amber-100'
+                          : 'border-amber-600/35 bg-amber-50 text-amber-950'
+                      }`}
+                      role="status"
+                    >
+                      This driver is far, ETA may be longer.
+                    </div>
+                  ) : null}
                   <button
                     type="button"
                     disabled={!selectedDriverId}

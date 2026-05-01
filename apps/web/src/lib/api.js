@@ -101,6 +101,17 @@ export async function createRide(token, payload) {
   })
 }
 
+/** Rider: update pickup/dropoff while status is REQUESTED. */
+export async function updateRideLocations(token, rideId, payload) {
+  return request(`/rides/${rideId}/locations`, {
+    method: 'PATCH',
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify(payload),
+  })
+}
+
 export async function setRidePayment(token, rideId, payload) {
   return request(`/rides/${rideId}/payment`, {
     method: 'POST',
@@ -168,6 +179,17 @@ export async function completeRide(token, rideId, body = {}) {
       Authorization: `Bearer ${token}`,
     },
     body: JSON.stringify(body),
+  })
+}
+
+/** Rider: 1–5 stars after trip (ride must be COMPLETED and unrated). */
+export async function rateRide(token, rideId, stars) {
+  return request(`/rides/${rideId}/rate`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ stars }),
   })
 }
 

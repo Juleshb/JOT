@@ -14,11 +14,16 @@ import {
   registerAccount,
   setRidePayment,
   updateMe,
+  updateRideLocations,
 } from './lib/api'
 import AuthModal from './components/AuthModal'
 import { formatDurationHoursMinutes } from './lib/formatDuration'
 import { estimateRideFareUsd } from './lib/estimateFare'
+import { addTrafficToMap, removeTrafficFromMap } from './lib/mapTraffic'
+import { getBasemapStyleUrl } from './lib/mapStyles'
+import { openGoogleStreetView } from './lib/streetView'
 import mapboxgl from 'mapbox-gl'
+import { io } from 'socket.io-client'
 import RiderPage from './pages/RiderPage'
 import DriverPage from './pages/DriverPage'
 import AdminPage from './pages/AdminPage'
@@ -56,6 +61,45 @@ const createFeatureCollection = (features) => ({
   features,
 })
 
+/** @param {Record<string, unknown>} feature Mapbox Geocoding feature */
+function suggestionFromGeocodeFeature(feature, opts = {}) {
+  const [lng, lat] = feature?.center ?? []
+  if (typeof lat !== 'number' || typeof lng !== 'number') return null
+  const badge = typeof opts.badge === 'string' ? opts.badge : undefined
+  const nearYou = Boolean(opts.nearYou)
+  return {
+    id: feature.id,
+    name: feature.text ?? feature.place_name ?? 'Location',
+    placeName: feature.place_name ?? feature.text ?? 'Location',
+    coords: { lat: Number(lat.toFixed(6)), lng: Number(lng.toFixed(6)) },
+    nearYou,
+    ...(badge ? { badge } : {}),
+  }
+}
+
+function dedupeSuggestionsById(list) {
+  const seen = new Set()
+  const out = []
+  for (const s of list) {
+    if (!s?.id) continue
+    if (seen.has(s.id)) continue
+    seen.add(s.id)
+    out.push(s)
+  }
+  return out
+}
+
+function haversineMeters(aLat, aLng, bLat, bLng) {
+  const R = 6371000
+  const toRad = (d) => (d * Math.PI) / 180
+  const dLat = toRad(bLat - aLat)
+  const dLng = toRad(bLng - aLng)
+  const x =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(aLat)) * Math.cos(toRad(bLat)) * Math.sin(dLng / 2) ** 2
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(x)))
+}
+
 function App() {
   const [darkMode, setDarkMode] = useState(false)
   const [authToken, setAuthToken] = useState(
@@ -81,6 +125,7 @@ function App() {
   const [riderBusy, setRiderBusy] = useState(false)
   const [riderMessage, setRiderMessage] = useState('')
   const [activeRide, setActiveRide] = useState(null)
+  const activeRideRef = useRef(null)
   const [rideHistory, setRideHistory] = useState([])
   const [riderForm, setRiderForm] = useState({
     pickupAddress: '',
@@ -113,7 +158,12 @@ function App() {
   const [routeOptions, setRouteOptions] = useState([])
   const [selectedRouteIndex, setSelectedRouteIndex] = useState(0)
   const [mapWebGlError, setMapWebGlError] = useState(null)
+  const [riderBasemapMode, setRiderBasemapMode] = useState('transit')
+  const [riderTrafficOn, setRiderTrafficOn] = useState(true)
+  const [riderLiveDriverCoords, setRiderLiveDriverCoords] = useState(null)
   const darkModeRef = useRef(darkMode)
+  const riderBasemapModeRef = useRef(riderBasemapMode)
+  const riderTrafficOnRef = useRef(riderTrafficOn)
   const riderCoordsRef = useRef(riderCoords)
   const snapToRoadRef = useRef(null)
   const reverseGeocodeRef = useRef(null)
@@ -126,7 +176,13 @@ function App() {
   const pickupMarkerRef = useRef(null)
   const dropoffMarkerRef = useRef(null)
   const riderDriverMarkerRef = useRef(null)
-  const hasDefaultedPickupFromGpsRef = useRef(false)
+  const pickupFollowsDeviceGpsRef = useRef(true)
+  /** Latest device GPS (always updated) — biases search & “near you” rows. */
+  const riderGeolocationRef = useRef(null)
+  const homeGeoRef = useRef(null)
+  const homePickupCoordsRef = useRef(null)
+  const lastRiderPickupSnapRef = useRef(0)
+  const lastRiderPickupGeocodeRef = useRef(0)
   const routeOptionsSourceIdRef = useRef('ride-route-options-source')
   const routeOptionsLayerIdRef = useRef('ride-route-options-layer')
   const selectedRouteSourceIdRef = useRef('ride-selected-route-source')
@@ -222,27 +278,48 @@ function App() {
   )
 
   const searchLocationSuggestions = useCallback(
-    async (query) => {
+    async (query, biasCoords) => {
       if (!mapboxAccessToken || !query?.trim()) return []
       const encoded = encodeURIComponent(query.trim())
-      const response = await fetch(
-        `https://api.mapbox.com/geocoding/v5/mapbox.places/${encoded}.json?autocomplete=true&limit=5&access_token=${mapboxAccessToken}`,
-      )
+      let url = `https://api.mapbox.com/geocoding/v5/mapbox.places/${encoded}.json?autocomplete=true&limit=12&access_token=${mapboxAccessToken}`
+      if (
+        biasCoords &&
+        Number.isFinite(biasCoords.lng) &&
+        Number.isFinite(biasCoords.lat)
+      ) {
+        url += `&proximity=${biasCoords.lng},${biasCoords.lat}`
+      }
+      const response = await fetch(url)
       if (!response.ok) return []
       const data = await response.json()
       const features = Array.isArray(data?.features) ? data.features : []
-      return features
-        .map((feature) => {
-          const [lng, lat] = feature?.center ?? []
-          if (typeof lat !== 'number' || typeof lng !== 'number') return null
-          return {
-            id: feature.id,
-            name: feature.text ?? feature.place_name ?? 'Selected location',
-            placeName: feature.place_name ?? feature.text ?? 'Selected location',
-            coords: { lat: Number(lat.toFixed(6)), lng: Number(lng.toFixed(6)) },
-          }
-        })
-        .filter(Boolean)
+      return dedupeSuggestionsById(
+        features.map((feature) => suggestionFromGeocodeFeature(feature)).filter(Boolean),
+      )
+    },
+    [mapboxAccessToken],
+  )
+
+  /** Reverse-geocode stack near a point — POIs, streets, places (biased to coordinates). */
+  const fetchNearbyLocationSuggestions = useCallback(
+    async (biasCoords) => {
+      if (
+        !mapboxAccessToken ||
+        !biasCoords ||
+        !Number.isFinite(biasCoords.lng) ||
+        !Number.isFinite(biasCoords.lat)
+      ) {
+        return []
+      }
+      const { lng, lat } = biasCoords
+      const url = `https://api.mapbox.com/geocoding/v5/mapbox.places/${lng},${lat}.json?limit=10&types=poi,address,place,locality,neighborhood&access_token=${mapboxAccessToken}`
+      const response = await fetch(url)
+      if (!response.ok) return []
+      const data = await response.json()
+      const features = Array.isArray(data?.features) ? data.features : []
+      return dedupeSuggestionsById(
+        features.map((feature) => suggestionFromGeocodeFeature(feature)).filter(Boolean),
+      )
     },
     [mapboxAccessToken],
   )
@@ -267,6 +344,9 @@ function App() {
   )
 
   const handleRiderLocationInput = useCallback((field, value) => {
+    if (field === 'pickup') {
+      pickupFollowsDeviceGpsRef.current = false
+    }
     setRiderForm((prev) => ({
       ...prev,
       [field === 'pickup' ? 'pickupAddress' : 'dropoffAddress']: value,
@@ -283,7 +363,15 @@ function App() {
   }, [])
 
   const handleSelectRiderLocation = useCallback(async (field, suggestion) => {
+    if (field === 'pickup') {
+      pickupFollowsDeviceGpsRef.current = false
+    }
     const snappedCoords = await snapToRoad(suggestion.coords)
+    const nextPickupCoord = field === 'pickup' ? snappedCoords : riderCoords.pickup
+    const nextDropoffCoord = field === 'dropoff' ? snappedCoords : riderCoords.dropoff
+    const nextPickupAddr = field === 'pickup' ? suggestion.placeName : riderForm.pickupAddress
+    const nextDropoffAddr = field === 'dropoff' ? suggestion.placeName : riderForm.dropoffAddress
+
     setRiderForm((prev) => ({
       ...prev,
       [field === 'pickup' ? 'pickupAddress' : 'dropoffAddress']: suggestion.placeName,
@@ -297,16 +385,33 @@ function App() {
     if (field === 'pickup') {
       setPickupSuggestions([])
       setShowPickupSuggestions(false)
-      return
+    } else {
+      setDropoffSuggestions([])
+      setShowDropoffSuggestions(false)
     }
 
-    setDropoffSuggestions([])
-    setShowDropoffSuggestions(false)
-  }, [snapToRoad])
+    const ride = activeRideRef.current
+    if (authToken && ride?.status === 'REQUESTED') {
+      try {
+        const updated = await updateRideLocations(authToken, ride.id, {
+          pickupLat: nextPickupCoord.lat,
+          pickupLng: nextPickupCoord.lng,
+          pickupAddress: nextPickupAddr.trim(),
+          dropoffLat: nextDropoffCoord.lat,
+          dropoffLng: nextDropoffCoord.lng,
+          dropoffAddress: nextDropoffAddr.trim(),
+        })
+        setActiveRide(updated)
+      } catch (e) {
+        setRiderMessage(e.message || 'Could not update ride location for drivers.')
+      }
+    }
+  }, [authToken, riderCoords.pickup, riderCoords.dropoff, riderForm.pickupAddress, riderForm.dropoffAddress, snapToRoad])
 
   const resolveLocationFromQuery = useCallback(
     async (query) => {
-      const results = await searchLocationSuggestions(query)
+      const bias = riderGeolocationRef.current ?? riderCoordsRef.current.pickup
+      const results = await searchLocationSuggestions(query, bias)
       return Array.isArray(results) && results.length > 0 ? results[0] : null
     },
     [searchLocationSuggestions],
@@ -321,8 +426,9 @@ function App() {
       const fallbackOption = {
         id: 'fallback-0',
         feature: fallbackFeature,
-        name: 'Straight line',
+        name: 'Straight line (no driving route)',
         summaryLine: '',
+        roadsLine: '',
         durationMinutes: null,
         distanceKm: null,
         priceUsd: null,
@@ -333,12 +439,38 @@ function App() {
       }
 
       const coordinates = `${pickup.lng},${pickup.lat};${dropoff.lng},${dropoff.lat}`
-      const response = await fetch(
-        `https://api.mapbox.com/directions/v5/mapbox/driving/${coordinates}?alternatives=true&geometries=geojson&overview=full&steps=false&access_token=${mapboxAccessToken}`,
-      )
 
-      if (!response.ok) {
-        return [fallbackOption]
+      const buildDirectionsUrl = (profile) => {
+        const params = new URLSearchParams({
+          geometries: 'geojson',
+          overview: 'full',
+          steps: 'true',
+          alternatives: 'true',
+          access_token: mapboxAccessToken,
+        })
+        if (profile === 'driving-traffic') {
+          params.set('departure_time', 'now')
+        }
+        return `https://api.mapbox.com/directions/v5/mapbox/${profile}/${coordinates}?${params.toString()}`
+      }
+
+      const collectDrivableRoadNames = (route) => {
+        const names = []
+        for (const leg of route.legs ?? []) {
+          for (const step of leg.steps ?? []) {
+            const n = typeof step.name === 'string' ? step.name.trim() : ''
+            if (n && !/^unnamed$/i.test(n)) names.push(n)
+          }
+        }
+        const seen = new Set()
+        const unique = []
+        for (const n of names) {
+          if (!seen.has(n)) {
+            seen.add(n)
+            unique.push(n)
+          }
+        }
+        return unique
       }
 
       const parseRoutes = (data) => {
@@ -350,15 +482,18 @@ function App() {
             const durationSeconds = Number(route.duration ?? 0)
             const distanceMeters = Number(route.distance ?? 0)
             const legs = Array.isArray(route?.legs) ? route.legs : []
-            const summaryLine = legs
+            const legSummary = legs
               .map((leg) => leg?.summary)
               .filter(Boolean)
               .join(' — ')
               .split(';')
               .map((part) => part.trim())
               .filter(Boolean)
-              .slice(0, 5)
+              .slice(0, 4)
               .join(' · ')
+            const roadNames = collectDrivableRoadNames(route)
+            const roadsLine = roadNames.join(' · ')
+            const summaryLine = roadsLine || legSummary
             return {
               id: `route-${index}`,
               feature: createLineFeature(routeCoordinates),
@@ -366,6 +501,7 @@ function App() {
                 durationSeconds > 0 ? Math.max(1, Math.round(durationSeconds / 60)) : null,
               distanceKm: distanceMeters > 0 ? Number((distanceMeters / 1000).toFixed(1)) : null,
               summaryLine,
+              roadsLine,
             }
           })
           .filter(Boolean)
@@ -383,7 +519,7 @@ function App() {
             name = `${name.slice(0, 43)}…`
           }
           if (!name) {
-            if (parsed.length === 1) name = 'Suggested route'
+            if (parsed.length === 1) name = 'Driving route'
             else if (index === 0) name = 'Primary option'
             else name = `Alternate ${index}`
           }
@@ -422,17 +558,23 @@ function App() {
         })
       }
 
-      const data = await response.json()
+      let response = await fetch(buildDirectionsUrl('driving-traffic'))
+      if (!response.ok) {
+        response = await fetch(buildDirectionsUrl('driving'))
+      }
+      if (!response.ok) {
+        return [fallbackOption]
+      }
+
+      let data = await response.json()
       let normalized = parseRoutes(data)
-      if (normalized.length > 0) return normalized
-
-      const walkingResponse = await fetch(
-        `https://api.mapbox.com/directions/v5/mapbox/walking/${coordinates}?alternatives=true&geometries=geojson&overview=full&steps=false&access_token=${mapboxAccessToken}`,
-      )
-      if (!walkingResponse.ok) return [fallbackOption]
-
-      const walkingData = await walkingResponse.json()
-      normalized = parseRoutes(walkingData)
+      if (normalized.length === 0) {
+        response = await fetch(buildDirectionsUrl('driving'))
+        if (response.ok) {
+          data = await response.json()
+          normalized = parseRoutes(data)
+        }
+      }
       return normalized.length > 0 ? normalized : [fallbackOption]
     },
     [mapboxAccessToken],
@@ -455,7 +597,10 @@ function App() {
   snapToRoadRef.current = snapToRoad
   reverseGeocodeRef.current = reverseGeocode
   darkModeRef.current = darkMode
+  riderBasemapModeRef.current = riderBasemapMode
+  riderTrafficOnRef.current = riderTrafficOn
   riderCoordsRef.current = riderCoords
+  activeRideRef.current = activeRide
   routeOptionsRef.current = routeOptions
   selectedRouteIndexRef.current = selectedRouteIndex
 
@@ -724,67 +869,237 @@ function App() {
   useEffect(() => {
     if (activePage !== 'rider' || !authToken) return undefined
 
+    const trackingDriver =
+      activeRide?.status === 'ACCEPTED' || activeRide?.status === 'STARTED'
+    const intervalMs = trackingDriver ? 5000 : 15000
+
     const pollId = window.setInterval(() => {
       void fetchRiderData()
-    }, 15000)
+    }, intervalMs)
 
     return () => window.clearInterval(pollId)
-  }, [activePage, authToken, fetchRiderData])
+  }, [activePage, authToken, fetchRiderData, activeRide?.status])
 
   useEffect(() => {
-    if (activePage !== 'rider') {
-      hasDefaultedPickupFromGpsRef.current = false
-      return
+    if (activePage === 'rider') {
+      pickupFollowsDeviceGpsRef.current = true
     }
+  }, [activePage])
 
-    if (!authUser || hasDefaultedPickupFromGpsRef.current) {
-      return
-    }
+  useEffect(() => {
+    if (activePage !== 'rider' || !authUser) return undefined
 
     if (!navigator.geolocation) {
-      hasDefaultedPickupFromGpsRef.current = true
       setRiderMessage('Geolocation is not supported in this browser.')
-      return
+      return undefined
     }
 
-    hasDefaultedPickupFromGpsRef.current = true
-    navigator.geolocation.getCurrentPosition(
+    let cancelled = false
+
+    const watchId = navigator.geolocation.watchPosition(
       async (position) => {
-        try {
-          const rawPickup = {
-            lat: Number(position.coords.latitude.toFixed(6)),
-            lng: Number(position.coords.longitude.toFixed(6)),
-          }
-          const snappedPickup = await snapToRoad(rawPickup)
-          setRiderCoords((prev) => ({ ...prev, pickup: snappedPickup }))
+        if (cancelled) return
 
-          if (mapRef.current) {
-            mapRef.current.easeTo({
-              center: [snappedPickup.lng, snappedPickup.lat],
-              duration: 700,
-            })
-          }
-
-          const placeName = await reverseGeocodeRef.current?.(snappedPickup)
-          setRiderForm((prev) => ({
-            ...prev,
-            pickupAddress:
-              placeName ??
-              `${snappedPickup.lat.toFixed(5)}, ${snappedPickup.lng.toFixed(5)}`,
-          }))
-          setRiderMessage('')
-        } catch {
-          setRiderMessage('Could not resolve your pickup address from GPS.')
+        const rawPickup = {
+          lat: Number(position.coords.latitude.toFixed(6)),
+          lng: Number(position.coords.longitude.toFixed(6)),
         }
+        riderGeolocationRef.current = rawPickup
+
+        if (!pickupFollowsDeviceGpsRef.current) return
+
+        const now = Date.now()
+        let nextPickup = rawPickup
+
+        if (now - lastRiderPickupSnapRef.current >= 8000) {
+          try {
+            const snapped = await snapToRoadRef.current?.(rawPickup)
+            if (snapped) nextPickup = snapped
+          } catch {
+            nextPickup = rawPickup
+          }
+          lastRiderPickupSnapRef.current = now
+        }
+
+        if (cancelled || !pickupFollowsDeviceGpsRef.current) return
+
+        setRiderCoords((prev) => ({ ...prev, pickup: nextPickup }))
+
+        if (now - lastRiderPickupGeocodeRef.current >= 12000) {
+          lastRiderPickupGeocodeRef.current = now
+          try {
+            const placeName = await reverseGeocodeRef.current?.(nextPickup)
+            if (
+              !cancelled &&
+              pickupFollowsDeviceGpsRef.current &&
+              typeof placeName === 'string' &&
+              placeName
+            ) {
+              setRiderForm((prev) => ({ ...prev, pickupAddress: placeName }))
+            } else if (!cancelled && pickupFollowsDeviceGpsRef.current && !placeName) {
+              setRiderForm((prev) => ({
+                ...prev,
+                pickupAddress: `${nextPickup.lat.toFixed(5)}, ${nextPickup.lng.toFixed(5)}`,
+              }))
+            }
+          } catch {
+            /* keep last label */
+          }
+        }
+
+        setRiderMessage('')
       },
       () => {
         setRiderMessage(
-          'Location access denied. Enable GPS permission to auto-fill pickup.',
+          'Location access denied. Enable GPS permission to auto-fill pickup in real time.',
         )
       },
-      { enableHighAccuracy: true, timeout: 12000, maximumAge: 0 },
+      { enableHighAccuracy: true, maximumAge: 2000, timeout: 15000 },
     )
-  }, [activePage, authUser, snapToRoad])
+
+    return () => {
+      cancelled = true
+      navigator.geolocation.clearWatch(watchId)
+    }
+  }, [activePage, authUser])
+
+  /** Keep rider UI in sync if the server broadcasts ride updates (e.g. another device). */
+  useEffect(() => {
+    if (activePage !== 'rider' || !authToken || authUser?.role !== 'RIDER') return undefined
+    if (!activeRide?.id || activeRide.status !== 'REQUESTED') return undefined
+    const rideId = activeRide.id
+    const socket = io(import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:3000', {
+      auth: { token: authToken },
+      transports: ['websocket'],
+    })
+    socket.on('connect', () => {
+      socket.emit('ride:subscribe', { rideId })
+    })
+    socket.on('ride:status', (p) => {
+      if (p?.rideId !== rideId || !p?.ride) return
+      setActiveRide(p.ride)
+    })
+    return () => {
+      socket.disconnect()
+    }
+  }, [activePage, authToken, authUser?.role, activeRide?.id, activeRide?.status])
+
+  /** While waiting for a driver, push pickup updates if the rider moves with GPS follow on. */
+  useEffect(() => {
+    if (activePage !== 'rider' || !authToken) return undefined
+    const ride = activeRideRef.current
+    if (!ride || ride.status !== 'REQUESTED') return undefined
+    if (!pickupFollowsDeviceGpsRef.current) return undefined
+
+    const pick = riderCoords.pickup
+    const dist = haversineMeters(ride.pickupLat, ride.pickupLng, pick.lat, pick.lng)
+    if (dist < 38) return undefined
+
+    let cancelled = false
+    const tid = window.setTimeout(async () => {
+      if (cancelled) return
+      const r = activeRideRef.current
+      if (!r || r.id !== ride.id || r.status !== 'REQUESTED') return
+      if (!pickupFollowsDeviceGpsRef.current) return
+      const rc = riderCoordsRef.current
+      const d = haversineMeters(r.pickupLat, r.pickupLng, rc.pickup.lat, rc.pickup.lng)
+      if (d < 32) return
+      try {
+        let addr = riderForm.pickupAddress.trim()
+        const label = await reverseGeocodeRef.current?.(rc.pickup)
+        if (label) addr = label
+        const updated = await updateRideLocations(authToken, ride.id, {
+          pickupLat: rc.pickup.lat,
+          pickupLng: rc.pickup.lng,
+          pickupAddress: addr || r.pickupAddress,
+          dropoffLat: rc.dropoff.lat,
+          dropoffLng: rc.dropoff.lng,
+          dropoffAddress: riderForm.dropoffAddress.trim(),
+        })
+        if (!cancelled) setActiveRide(updated)
+      } catch {
+        /* ignore transient errors */
+      }
+    }, 10_000)
+
+    return () => {
+      cancelled = true
+      window.clearTimeout(tid)
+    }
+  }, [
+    activePage,
+    authToken,
+    riderCoords.pickup.lat,
+    riderCoords.pickup.lng,
+    riderCoords.dropoff.lat,
+    riderCoords.dropoff.lng,
+    riderForm.pickupAddress,
+    riderForm.dropoffAddress,
+    activeRide?.id,
+    activeRide?.status,
+    activeRide?.pickupLat,
+    activeRide?.pickupLng,
+  ])
+
+  useEffect(() => {
+    if (activePage !== 'rider' || !authToken || !authUser) {
+      setRiderLiveDriverCoords(null)
+      return undefined
+    }
+
+    const rideId = activeRide?.id
+    const unratedCompleted =
+      activeRide?.status === 'COMPLETED' &&
+      !activeRide?.rating &&
+      Boolean(activeRide?.driverId)
+    const track =
+      activeRide?.driverId &&
+      (activeRide?.status === 'ACCEPTED' ||
+        activeRide?.status === 'STARTED' ||
+        unratedCompleted)
+
+    if (!track || !rideId) {
+      setRiderLiveDriverCoords(null)
+      return undefined
+    }
+
+    const socket = io(import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:3000', {
+      auth: { token: authToken },
+      transports: ['websocket'],
+    })
+
+    const onDriverLocation = (payload) => {
+      if (payload?.rideId !== rideId) return
+      const lat = Number(payload?.lat)
+      const lng = Number(payload?.lng)
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) return
+      setRiderLiveDriverCoords({ lat, lng })
+    }
+
+    const onRideStatus = (payload) => {
+      if (payload?.rideId !== rideId || !payload?.ride) return
+      setActiveRide(payload.ride)
+    }
+
+    socket.on('connect', () => {
+      socket.emit('ride:subscribe', { rideId })
+    })
+    socket.on('driver:location', onDriverLocation)
+    socket.on('ride:status', onRideStatus)
+
+    return () => {
+      setRiderLiveDriverCoords(null)
+      socket.disconnect()
+    }
+  }, [
+    activePage,
+    authToken,
+    authUser,
+    activeRide?.id,
+    activeRide?.status,
+    activeRide?.driverId,
+    activeRide?.rating,
+  ])
 
   useEffect(() => {
     if (activePage === 'driver' && authToken && authUser?.role === 'DRIVER') {
@@ -795,60 +1110,102 @@ function App() {
   useEffect(() => {
     if (activePage !== 'rider' || !showPickupSuggestions) return
     const query = riderForm.pickupAddress.trim()
-    if (query.length < 3) {
-      setPickupSuggestions([])
-      return
-    }
     let cancelled = false
+    const delay = query.length < 3 ? 200 : 500
 
     const timeout = window.setTimeout(async () => {
       try {
         setPickupSearchBusy(true)
-        const suggestions = await searchLocationSuggestions(query)
-        if (!cancelled) {
-          setPickupSuggestions(suggestions)
+        const geo = riderGeolocationRef.current
+        const bias = geo ?? riderCoordsRef.current.pickup
+
+        if (query.length < 3) {
+          if (!mapboxAccessToken) {
+            if (!cancelled) setPickupSuggestions([])
+            return
+          }
+          const nearby = await fetchNearbyLocationSuggestions(bias)
+          let list = nearby
+          if (geo) {
+            const label = await reverseGeocodeRef.current?.(geo)
+            const currentRow = {
+              id: '__jo_near_gps__',
+              name: label ?? 'Current location',
+              placeName: label ? `${label} · Near you` : 'Current location · Near you',
+              coords: { ...geo },
+              nearYou: true,
+              badge: 'Near you',
+            }
+            list = dedupeSuggestionsById([currentRow, ...nearby])
+          }
+          if (!cancelled) setPickupSuggestions(list)
+          return
         }
+
+        const suggestions = await searchLocationSuggestions(query, geo ?? bias)
+        if (!cancelled) setPickupSuggestions(suggestions)
       } finally {
-        if (!cancelled) {
-          setPickupSearchBusy(false)
-        }
+        if (!cancelled) setPickupSearchBusy(false)
       }
-    }, 500)
+    }, delay)
 
     return () => {
       cancelled = true
       window.clearTimeout(timeout)
     }
-  }, [activePage, riderForm.pickupAddress, searchLocationSuggestions, showPickupSuggestions])
+  }, [
+    activePage,
+    riderForm.pickupAddress,
+    mapboxAccessToken,
+    showPickupSuggestions,
+    searchLocationSuggestions,
+    fetchNearbyLocationSuggestions,
+  ])
 
   useEffect(() => {
     if (activePage !== 'rider' || !showDropoffSuggestions) return
     const query = riderForm.dropoffAddress.trim()
-    if (query.length < 3) {
-      setDropoffSuggestions([])
-      return
-    }
     let cancelled = false
+    const delay = query.length < 3 ? 200 : 500
+    const pickupPivot = riderCoordsRef.current.pickup
 
     const timeout = window.setTimeout(async () => {
       try {
         setDropoffSearchBusy(true)
-        const suggestions = await searchLocationSuggestions(query)
-        if (!cancelled) {
-          setDropoffSuggestions(suggestions)
+
+        if (query.length < 3) {
+          if (!mapboxAccessToken) {
+            if (!cancelled) setDropoffSuggestions([])
+            return
+          }
+          const nearby = await fetchNearbyLocationSuggestions(pickupPivot)
+          const tagged = nearby.map((s) => ({
+            ...s,
+            badge: s.badge ?? 'Near pickup',
+          }))
+          if (!cancelled) setDropoffSuggestions(tagged)
+          return
         }
+
+        const suggestions = await searchLocationSuggestions(query, pickupPivot)
+        if (!cancelled) setDropoffSuggestions(suggestions)
       } finally {
-        if (!cancelled) {
-          setDropoffSearchBusy(false)
-        }
+        if (!cancelled) setDropoffSearchBusy(false)
       }
-    }, 500)
+    }, delay)
 
     return () => {
       cancelled = true
       window.clearTimeout(timeout)
     }
-  }, [activePage, riderForm.dropoffAddress, searchLocationSuggestions, showDropoffSuggestions])
+  }, [
+    activePage,
+    riderForm.dropoffAddress,
+    mapboxAccessToken,
+    showDropoffSuggestions,
+    searchLocationSuggestions,
+    fetchNearbyLocationSuggestions,
+  ])
 
   useEffect(() => {
     if (!showPickupSuggestions) {
@@ -863,27 +1220,65 @@ function App() {
   }, [showDropoffSuggestions])
 
   useEffect(() => {
+    if (typeof window === 'undefined' || !navigator.geolocation) return
+    if (activePage !== 'home') {
+      return undefined
+    }
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        homeGeoRef.current = {
+          lat: Number(pos.coords.latitude.toFixed(6)),
+          lng: Number(pos.coords.longitude.toFixed(6)),
+        }
+      },
+      () => {
+        homeGeoRef.current = null
+      },
+      { maximumAge: 120_000, enableHighAccuracy: false, timeout: 12_000 },
+    )
+    return undefined
+  }, [activePage])
+
+  useEffect(() => {
     if (activePage !== 'home' || !showHomePickupSuggestions) return
     const query = homeEstimateForm.pickupAddress.trim()
-    if (query.length < 3) {
-      setHomePickupSuggestions([])
-      return
-    }
     let cancelled = false
+    const delay = query.length < 3 ? 200 : 500
 
     const timeout = window.setTimeout(async () => {
       try {
         setHomePickupSearchBusy(true)
-        const suggestions = await searchLocationSuggestions(query)
-        if (!cancelled) {
-          setHomePickupSuggestions(suggestions)
+        const geo = homeGeoRef.current
+
+        if (query.length < 3) {
+          if (!mapboxAccessToken) {
+            if (!cancelled) setHomePickupSuggestions([])
+            return
+          }
+          const nearby = await fetchNearbyLocationSuggestions(geo)
+          let list = nearby
+          if (geo) {
+            const label = await reverseGeocodeRef.current?.(geo)
+            const currentRow = {
+              id: '__jo_home_gps__',
+              name: label ?? 'Current location',
+              placeName: label ? `${label} · Near you` : 'Current location · Near you',
+              coords: { ...geo },
+              nearYou: true,
+              badge: 'Near you',
+            }
+            list = dedupeSuggestionsById([currentRow, ...nearby])
+          }
+          if (!cancelled) setHomePickupSuggestions(list)
+          return
         }
+
+        const suggestions = await searchLocationSuggestions(query, geo)
+        if (!cancelled) setHomePickupSuggestions(suggestions)
       } finally {
-        if (!cancelled) {
-          setHomePickupSearchBusy(false)
-        }
+        if (!cancelled) setHomePickupSearchBusy(false)
       }
-    }, 500)
+    }, delay)
 
     return () => {
       cancelled = true
@@ -892,32 +1287,43 @@ function App() {
   }, [
     activePage,
     homeEstimateForm.pickupAddress,
-    searchLocationSuggestions,
+    mapboxAccessToken,
     showHomePickupSuggestions,
+    searchLocationSuggestions,
+    fetchNearbyLocationSuggestions,
   ])
 
   useEffect(() => {
     if (activePage !== 'home' || !showHomeDropoffSuggestions) return
     const query = homeEstimateForm.dropoffAddress.trim()
-    if (query.length < 3) {
-      setHomeDropoffSuggestions([])
-      return
-    }
     let cancelled = false
+    const delay = query.length < 3 ? 200 : 500
 
     const timeout = window.setTimeout(async () => {
       try {
         setHomeDropoffSearchBusy(true)
-        const suggestions = await searchLocationSuggestions(query)
-        if (!cancelled) {
-          setHomeDropoffSuggestions(suggestions)
+        const pivot = homePickupCoordsRef.current ?? homeGeoRef.current
+
+        if (query.length < 3) {
+          if (!mapboxAccessToken || !pivot) {
+            if (!cancelled) setHomeDropoffSuggestions([])
+            return
+          }
+          const nearby = await fetchNearbyLocationSuggestions(pivot)
+          const tagged = nearby.map((s) => ({
+            ...s,
+            badge: s.badge ?? (homePickupCoordsRef.current ? 'Near pickup' : 'Near you'),
+          }))
+          if (!cancelled) setHomeDropoffSuggestions(tagged)
+          return
         }
+
+        const suggestions = await searchLocationSuggestions(query, pivot)
+        if (!cancelled) setHomeDropoffSuggestions(suggestions)
       } finally {
-        if (!cancelled) {
-          setHomeDropoffSearchBusy(false)
-        }
+        if (!cancelled) setHomeDropoffSearchBusy(false)
       }
-    }, 500)
+    }, delay)
 
     return () => {
       cancelled = true
@@ -926,8 +1332,10 @@ function App() {
   }, [
     activePage,
     homeEstimateForm.dropoffAddress,
-    searchLocationSuggestions,
+    mapboxAccessToken,
     showHomeDropoffSuggestions,
+    searchLocationSuggestions,
+    fetchNearbyLocationSuggestions,
   ])
 
   useEffect(() => {
@@ -960,7 +1368,7 @@ function App() {
       if (!cancelled) {
         setRouteOptions(nextRouteOptions)
       }
-    }, 250)
+    }, 1200)
 
     return () => {
       cancelled = true
@@ -1027,9 +1435,7 @@ function App() {
       const rc = riderCoordsRef.current
       map = new mapboxgl.Map({
         container,
-        style: darkModeRef.current
-          ? 'mapbox://styles/mapbox/dark-v11'
-          : 'mapbox://styles/mapbox/light-v11',
+        style: getBasemapStyleUrl(riderBasemapModeRef.current, darkModeRef.current),
         center: [rc.pickup.lng, rc.pickup.lat],
         zoom: 12,
         attributionControl: false,
@@ -1065,9 +1471,13 @@ function App() {
           [riderCoordsRef.current.dropoff.lng, riderCoordsRef.current.dropoff.lat],
         ])
       ensureRouteLayer(map, createFeatureCollection(ro.map((option) => option.feature)), selected)
+      if (riderTrafficOnRef.current) {
+        addTrafficToMap(map)
+      }
     })
 
     pickupMarker.on('drag', () => {
+      pickupFollowsDeviceGpsRef.current = false
       const next = pickupMarker.getLngLat()
       setRiderCoords((prev) => ({
         ...prev,
@@ -1134,17 +1544,40 @@ function App() {
   useEffect(() => {
     if (!mapRef.current || activePage !== 'rider') return
 
-    mapRef.current.setStyle(
-      darkMode ? 'mapbox://styles/mapbox/dark-v11' : 'mapbox://styles/mapbox/light-v11',
-    )
+    mapRef.current.setStyle(getBasemapStyleUrl(riderBasemapMode, darkMode))
     mapRef.current.once('style.load', () => {
-      ensureRouteLayer(
-        mapRef.current,
-        createFeatureCollection(routeOptionFeatures),
-        selectedRouteFeature,
-      )
+      const map = mapRef.current
+      if (!map) return
+      const ro = routeOptionsRef.current
+      const idx = selectedRouteIndexRef.current
+      const rc = riderCoordsRef.current
+      const selected =
+        ro[idx]?.feature ??
+        ro[0]?.feature ??
+        createLineFeature([
+          [rc.pickup.lng, rc.pickup.lat],
+          [rc.dropoff.lng, rc.dropoff.lat],
+        ])
+      ensureRouteLayer(map, createFeatureCollection(ro.map((option) => option.feature)), selected)
+      if (riderTrafficOnRef.current) {
+        addTrafficToMap(map)
+      }
     })
-  }, [activePage, darkMode, ensureRouteLayer])
+  }, [activePage, darkMode, riderBasemapMode, ensureRouteLayer])
+
+  useEffect(() => {
+    if (!mapRef.current || activePage !== 'rider') return
+    const map = mapRef.current
+    const applyTraffic = () => {
+      if (riderTrafficOn) addTrafficToMap(map)
+      else removeTrafficFromMap(map)
+    }
+    if (map.isStyleLoaded()) {
+      applyTraffic()
+    } else {
+      map.once('style.load', applyTraffic)
+    }
+  }, [riderTrafficOn, activePage])
 
   useEffect(() => {
     if (!mapRef.current || !pickupMarkerRef.current || !dropoffMarkerRef.current) return
@@ -1190,8 +1623,8 @@ function App() {
     if (!mapRef.current || activePage !== 'rider') return
     const map = mapRef.current
 
-    const driverLat = activeRide?.driver?.driverProfile?.currentLat
-    const driverLng = activeRide?.driver?.driverProfile?.currentLng
+    const driverLat = riderLiveDriverCoords?.lat ?? activeRide?.driver?.driverProfile?.currentLat
+    const driverLng = riderLiveDriverCoords?.lng ?? activeRide?.driver?.driverProfile?.currentLng
     const hasDriverCoords =
       typeof driverLat === 'number' &&
       Number.isFinite(driverLat) &&
@@ -1356,7 +1789,7 @@ function App() {
     }
 
     void drawDriverRoute()
-  }, [activePage, activeRide, mapboxAccessToken])
+  }, [activePage, activeRide, mapboxAccessToken, riderLiveDriverCoords])
 
   useEffect(() => {
     if (activePage !== 'rider' || !mapRef.current) return
@@ -1365,6 +1798,10 @@ function App() {
     window.addEventListener('resize', onResize)
     return () => window.removeEventListener('resize', onResize)
   }, [activePage])
+
+  const handleRiderOpenStreetView = useCallback(() => {
+    openGoogleStreetView(riderCoords.pickup.lat, riderCoords.pickup.lng)
+  }, [riderCoords.pickup.lat, riderCoords.pickup.lng])
 
   const handleCancelRide = async () => {
     if (!authToken || !activeRide?.id) return
@@ -1411,7 +1848,10 @@ function App() {
     if (field === 'pickup') {
       setHomeEstimateForm((prev) => ({ ...prev, pickupAddress: value }))
       setShowHomePickupSuggestions(true)
-      if (!value.trim()) setHomePickupSuggestions([])
+      if (!value.trim()) {
+        setHomePickupSuggestions([])
+        homePickupCoordsRef.current = null
+      }
       return
     }
 
@@ -1422,6 +1862,9 @@ function App() {
 
   const handleSelectHomeLocation = useCallback((field, suggestion) => {
     if (field === 'pickup') {
+      if (suggestion?.coords) {
+        homePickupCoordsRef.current = suggestion.coords
+      }
       setHomeEstimateForm((prev) => ({ ...prev, pickupAddress: suggestion.placeName }))
       setHomePickupSuggestions([])
       setShowHomePickupSuggestions(false)
@@ -1874,6 +2317,11 @@ function App() {
           setRiderMessage={setRiderMessage}
           handleCancelRide={handleCancelRide}
           navigateToPage={navigateToPage}
+          riderBasemapMode={riderBasemapMode}
+          setRiderBasemapMode={setRiderBasemapMode}
+          riderTrafficOn={riderTrafficOn}
+          setRiderTrafficOn={setRiderTrafficOn}
+          onOpenStreetView={handleRiderOpenStreetView}
         />
       ) : activePage === 'about' ? (
         <AboutPage darkMode={darkMode} navigateToPage={navigateToPage} />
@@ -1963,7 +2411,7 @@ function App() {
               />
               {showHomePickupSuggestions && (
                 <div
-                  className={`absolute z-20 mt-1 max-h-44 w-full overflow-auto rounded-xl border shadow-lg ${
+                  className={`absolute z-20 mt-1 max-h-60 w-full overflow-auto rounded-xl border text-xs shadow-lg sm:max-h-72 ${
                     darkMode
                       ? 'border-[#9d3733]/40 bg-[#121212] text-[#f2e3bb]'
                       : 'border-[#9d3733]/25 bg-white text-[#2d100f]'
@@ -1984,11 +2432,18 @@ function App() {
                             : 'border-[#9d3733]/15 hover:bg-[#9d3733]/10'
                         }`}
                       >
-                        {suggestion.placeName}
+                        {suggestion.badge ? (
+                          <span className="mb-0.5 block text-[10px] font-bold uppercase tracking-wide text-[#15803d]">
+                            {suggestion.badge}
+                          </span>
+                        ) : null}
+                        <span className="text-[13px] leading-snug sm:text-sm">{suggestion.placeName}</span>
                       </button>
                     ))
                   ) : (
-                    <p className="px-3 py-2 opacity-70">Type 3+ letters to see locations.</p>
+                    <p className="px-3 py-2 opacity-70">
+                      Allow location for nearby places, or type 3+ letters to search anywhere.
+                    </p>
                   )}
                 </div>
               )}
@@ -2014,7 +2469,7 @@ function App() {
               />
               {showHomeDropoffSuggestions && (
                 <div
-                  className={`absolute z-20 mt-1 max-h-44 w-full overflow-auto rounded-xl border shadow-lg ${
+                  className={`absolute z-20 mt-1 max-h-60 w-full overflow-auto rounded-xl border text-xs shadow-lg sm:max-h-72 ${
                     darkMode
                       ? 'border-[#9d3733]/40 bg-[#121212] text-[#f2e3bb]'
                       : 'border-[#9d3733]/25 bg-white text-[#2d100f]'
@@ -2035,11 +2490,19 @@ function App() {
                             : 'border-[#9d3733]/15 hover:bg-[#9d3733]/10'
                         }`}
                       >
-                        {suggestion.placeName}
+                        {suggestion.badge ? (
+                          <span className="mb-0.5 block text-[10px] font-bold uppercase tracking-wide text-[#15803d]">
+                            {suggestion.badge}
+                          </span>
+                        ) : null}
+                        <span className="text-[13px] leading-snug sm:text-sm">{suggestion.placeName}</span>
                       </button>
                     ))
                   ) : (
-                    <p className="px-3 py-2 opacity-70">Type 3+ letters to see locations.</p>
+                    <p className="px-3 py-2 opacity-70">
+                      Set pickup first or allow location — then nearby destinations appear, or type 3+
+                      letters.
+                    </p>
                   )}
                 </div>
               )}

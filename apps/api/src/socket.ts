@@ -65,6 +65,19 @@ export function initSocket(httpServer: HttpServer, corsOrigin: string) {
         where: { userId },
         data: { currentLat: lat, currentLng: lng, isOnline: true },
       });
+
+      const activeRides = await prisma.ride.findMany({
+        where: {
+          driverId: userId,
+          status: { in: ['ACCEPTED', 'STARTED'] },
+        },
+        select: { id: true, riderId: true },
+      });
+      for (const ride of activeRides) {
+        const out = { rideId: ride.id, lat, lng };
+        emitToUser(ride.riderId, 'driver:location', out);
+        io?.to(`ride:${ride.id}`).emit('driver:location', out);
+      }
     });
 
     socket.on('ride:subscribe', async (payload: { rideId: string }) => {
@@ -77,6 +90,9 @@ export function initSocket(httpServer: HttpServer, corsOrigin: string) {
           id: rideId,
           OR: [{ riderId: userId }, { driverId: userId }],
         },
+        // Minimal select so subscribe auth does not depend on every Ride column
+        // (avoids stale client / DB mismatch if a column was removed from the table).
+        select: { id: true },
       });
       if (ride) {
         void socket.join(`ride:${rideId}`);
@@ -103,4 +119,9 @@ export function broadcastRideOffer(driverUserIds: string[], payload: unknown) {
   for (const id of driverUserIds) {
     io?.to(`user:${id}`).emit('ride:offer', payload);
   }
+}
+
+/** Notify all online drivers that a pending ride’s pickup/dropoff was updated (same shape as ride:offer). */
+export function broadcastRideOfferUpdate(payload: unknown) {
+  io?.to('drivers:online').emit('ride:offer_update', payload);
 }

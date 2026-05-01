@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { HttpError } from '../lib/httpError.js';
 import { prisma } from '../lib/prisma.js';
 import { getStripeClient } from '../lib/stripe.js';
-import { broadcastRideOffer, emitRideUpdate, emitToUser } from '../socket.js';
+import { broadcastRideOffer, broadcastRideOfferUpdate, emitRideUpdate, emitToUser } from '../socket.js';
 import { requireAuth, requireRole, type AuthedRequest } from '../middleware/auth.js';
 
 const router = Router();
@@ -34,6 +34,15 @@ const createRideSchema = z.object({
   stripePaymentIntentId: z.string().min(1).optional(),
 });
 
+const updateRideLocationsSchema = z.object({
+  pickupLat: z.number(),
+  pickupLng: z.number(),
+  pickupAddress: z.string().min(1),
+  dropoffLat: z.number(),
+  dropoffLng: z.number(),
+  dropoffAddress: z.string().min(1),
+});
+
 function haversineKm(aLat: number, aLng: number, bLat: number, bLng: number): number {
   const R = 6371;
   const dLat = ((bLat - aLat) * Math.PI) / 180;
@@ -46,6 +55,27 @@ function haversineKm(aLat: number, aLng: number, bLat: number, bLng: number): nu
       Math.sin(dLng / 2);
   const c = 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x));
   return R * c;
+}
+
+async function nearbyDriverUserIdsForPickup(pickupLat: number, pickupLng: number): Promise<string[]> {
+  const candidates = await prisma.driverProfile.findMany({
+    where: {
+      isOnline: true,
+      verificationStatus: 'APPROVED',
+      currentLat: { not: null },
+      currentLng: { not: null },
+    },
+    take: 20,
+  });
+  const nearby = candidates
+    .map((d) => ({
+      userId: d.userId,
+      km: haversineKm(pickupLat, pickupLng, d.currentLat!, d.currentLng!),
+    }))
+    .filter((c) => c.km <= 15)
+    .sort((a, b) => a.km - b.km)
+    .slice(0, 8);
+  return nearby.map((n) => n.userId);
 }
 
 router.get('/nearby-drivers', requireAuth, requireRole('RIDER'), async (req, res, next) => {
@@ -76,6 +106,8 @@ router.get('/nearby-drivers', requireAuth, requireRole('RIDER'), async (req, res
         vehicleModel: d.vehicleModel,
         vehicleColor: d.vehicleColor,
         licensePlate: d.licensePlate,
+        averageRiderRating: d.averageRiderRating,
+        riderRatingCount: d.riderRatingCount,
         km: haversineKm(lat, lng, d.currentLat!, d.currentLng!),
       }))
       .filter((d) => d.km <= 15)
@@ -169,32 +201,20 @@ router.post('/', requireAuth, requireRole('RIDER'), async (req, res, next) => {
 
     const driverIds = preferredDriverId ? [preferredDriverId] : [];
     if (!preferredDriverId) {
-      const candidates = await prisma.driverProfile.findMany({
-        where: {
-          isOnline: true,
-          verificationStatus: 'APPROVED',
-          currentLat: { not: null },
-          currentLng: { not: null },
-        },
-        take: 20,
-      });
-      const nearby = candidates
-        .map((d) => ({
-          userId: d.userId,
-          km: haversineKm(body.pickupLat, body.pickupLng, d.currentLat!, d.currentLng!),
-        }))
-        .filter((c) => c.km <= 15)
-        .sort((a, b) => a.km - b.km)
-        .slice(0, 8);
-      driverIds.push(...nearby.map((n) => n.userId));
+      driverIds.push(...(await nearbyDriverUserIdsForPickup(body.pickupLat, body.pickupLng)));
     }
-    broadcastRideOffer(driverIds, {
+    const offerPayload = {
       rideId: ride.id,
       pickupAddress: ride.pickupAddress,
       dropoffAddress: ride.dropoffAddress,
+      pickupLat: ride.pickupLat,
+      pickupLng: ride.pickupLng,
+      dropoffLat: ride.dropoffLat,
+      dropoffLng: ride.dropoffLng,
       fareEstimate: ride.fareEstimate,
       riderName: ride.rider.name,
-    });
+    };
+    broadcastRideOffer(driverIds, offerPayload);
     if (preferredDriverId) {
       emitToUser(userId, 'ride:progress', {
         rideId: ride.id,
@@ -209,32 +229,54 @@ router.post('/', requireAuth, requireRole('RIDER'), async (req, res, next) => {
   }
 });
 
+const rideRatingSelect = { select: { id: true, stars: true, createdAt: true } } as const;
+
+const activeRideInclude = {
+  rider: { select: { id: true, name: true, phone: true } },
+  driver: {
+    select: {
+      id: true,
+      name: true,
+      phone: true,
+      driverProfile: {
+        select: {
+          currentLat: true,
+          currentLng: true,
+          isOnline: true,
+        },
+      },
+    },
+  },
+  rating: rideRatingSelect,
+} as const;
+
 router.get('/active', requireAuth, async (req, res, next) => {
   try {
     const { userId, role } = req as AuthedRequest;
-    const ride = await prisma.ride.findFirst({
-      where:
-        role === 'RIDER'
-          ? { riderId: userId, status: { in: ['REQUESTED', 'ACCEPTED', 'STARTED'] } }
-          : { driverId: userId, status: { in: ['ACCEPTED', 'STARTED'] } },
-      include: {
-        rider: { select: { id: true, name: true, phone: true } },
-        driver: {
-          select: {
-            id: true,
-            name: true,
-            phone: true,
-            driverProfile: {
-              select: {
-                currentLat: true,
-                currentLng: true,
-                isOnline: true,
-              },
-            },
-          },
+    let ride =
+      role === 'RIDER'
+        ? await prisma.ride.findFirst({
+            where: { riderId: userId, status: { in: ['REQUESTED', 'ACCEPTED', 'STARTED'] } },
+            include: activeRideInclude,
+          })
+        : await prisma.ride.findFirst({
+            where: { driverId: userId, status: { in: ['ACCEPTED', 'STARTED'] } },
+            include: activeRideInclude,
+          });
+
+    if (role === 'RIDER' && !ride) {
+      ride = await prisma.ride.findFirst({
+        where: {
+          riderId: userId,
+          status: 'COMPLETED',
+          driverId: { not: null },
+          rating: null,
         },
-      },
-    });
+        orderBy: { completedAt: 'desc' },
+        include: activeRideInclude,
+      });
+    }
+
     res.json(ride);
   } catch (e) {
     next(e);
@@ -252,9 +294,74 @@ router.get('/history', requireAuth, async (req, res, next) => {
       include: {
         rider: { select: { id: true, name: true } },
         driver: { select: { id: true, name: true } },
+        rating: rideRatingSelect,
       },
     });
     res.json(rides);
+  } catch (e) {
+    next(e);
+  }
+});
+
+router.patch('/:id/locations', requireAuth, requireRole('RIDER'), async (req, res, next) => {
+  try {
+    const body = updateRideLocationsSchema.parse(req.body);
+    const rideId = rideIdFromParams(req);
+    if (!rideId) {
+      throw new HttpError(400, 'Missing ride id');
+    }
+    const { userId } = req as AuthedRequest;
+    const pending = await prisma.ride.findFirst({
+      where: { id: rideId, riderId: userId, status: 'REQUESTED' },
+    });
+    if (!pending) {
+      throw new HttpError(404, 'No pending ride to update, or it is not yours.');
+    }
+    const updated = await prisma.ride.update({
+      where: { id: rideId },
+      data: {
+        pickupLat: body.pickupLat,
+        pickupLng: body.pickupLng,
+        pickupAddress: body.pickupAddress,
+        dropoffLat: body.dropoffLat,
+        dropoffLng: body.dropoffLng,
+        dropoffAddress: body.dropoffAddress,
+      },
+      include: {
+        rider: { select: { id: true, name: true, phone: true } },
+        driver: {
+          select: {
+            id: true,
+            name: true,
+            phone: true,
+            driverProfile: {
+              select: { currentLat: true, currentLng: true, isOnline: true },
+            },
+          },
+        },
+        rating: rideRatingSelect,
+      },
+    });
+    const offerPayload = {
+      rideId: updated.id,
+      pickupAddress: updated.pickupAddress,
+      dropoffAddress: updated.dropoffAddress,
+      pickupLat: updated.pickupLat,
+      pickupLng: updated.pickupLng,
+      dropoffLat: updated.dropoffLat,
+      dropoffLng: updated.dropoffLng,
+      fareEstimate: updated.fareEstimate,
+      riderName: updated.rider.name,
+    };
+    if (updated.driverId) {
+      broadcastRideOffer([updated.driverId], offerPayload);
+    } else {
+      const driverIds = await nearbyDriverUserIdsForPickup(body.pickupLat, body.pickupLng);
+      broadcastRideOffer(driverIds, offerPayload);
+    }
+    broadcastRideOfferUpdate({ ...offerPayload, updated: true });
+    emitRideUpdate(updated.id, { rideId: updated.id, status: updated.status, ride: updated });
+    res.json(updated);
   } catch (e) {
     next(e);
   }
@@ -295,10 +402,7 @@ router.post('/:id/accept', requireAuth, requireRole('DRIVER'), async (req, res, 
       }
       return tx.ride.findUnique({
         where: { id: rideId },
-        include: {
-          rider: { select: { id: true, name: true, phone: true } },
-          driver: { select: { id: true, name: true, phone: true } },
-        },
+        include: activeRideInclude,
       });
     });
     if (ride) {
@@ -331,10 +435,7 @@ router.post('/:id/start', requireAuth, requireRole('DRIVER'), async (req, res, n
     }
     const full = await prisma.ride.findUnique({
       where: { id: rideId },
-      include: {
-        rider: { select: { id: true, name: true } },
-        driver: { select: { id: true, name: true } },
-      },
+      include: activeRideInclude,
     });
     emitRideUpdate(rideId, { rideId, status: 'STARTED', ride: full });
     res.json(full);
@@ -413,11 +514,80 @@ router.post('/:id/payment', requireAuth, requireRole('RIDER'), async (req, res, 
       include: {
         rider: { select: { id: true, name: true } },
         driver: { select: { id: true, name: true } },
+        rating: rideRatingSelect,
       },
     });
 
     emitRideUpdate(rideId, { rideId, status: updated.status, ride: updated });
     res.json(updated);
+  } catch (e) {
+    next(e);
+  }
+});
+
+const riderRateSchema = z.object({
+  stars: z.number().int().min(1).max(5),
+});
+
+router.post('/:id/rate', requireAuth, requireRole('RIDER'), async (req, res, next) => {
+  try {
+    const body = riderRateSchema.parse(req.body);
+    const { userId } = req as AuthedRequest;
+    const rideId = rideIdFromParams(req);
+    if (!rideId) {
+      throw new HttpError(400, 'Missing ride id');
+    }
+
+    const full = await prisma.$transaction(async (tx) => {
+      const pending = await tx.ride.findFirst({
+        where: {
+          id: rideId,
+          riderId: userId,
+          status: 'COMPLETED',
+          driverId: { not: null },
+          rating: null,
+        },
+      });
+      if (!pending?.driverId) {
+        throw new HttpError(404, 'Ride not found or already rated');
+      }
+      const driverId = pending.driverId;
+
+      await tx.rideRating.create({
+        data: {
+          rideId,
+          stars: body.stars,
+        },
+      });
+
+      const agg = await tx.rideRating.aggregate({
+        where: { ride: { driverId } },
+        _avg: { stars: true },
+        _count: { _all: true },
+      });
+      const count = agg._count._all;
+      await tx.driverProfile.update({
+        where: { userId: driverId },
+        data: {
+          averageRiderRating: count > 0 && agg._avg.stars != null ? agg._avg.stars : null,
+          riderRatingCount: count,
+        },
+      });
+
+      return tx.ride.findUnique({
+        where: { id: rideId },
+        include: {
+          rider: { select: { id: true, name: true, phone: true } },
+          driver: { select: { id: true, name: true, phone: true } },
+          rating: rideRatingSelect,
+        },
+      });
+    });
+
+    if (full) {
+      emitRideUpdate(rideId, { rideId, status: full.status, ride: full });
+    }
+    res.json(full);
   } catch (e) {
     next(e);
   }
@@ -444,10 +614,7 @@ router.post('/:id/complete', requireAuth, requireRole('DRIVER'), async (req, res
     }
     const full = await prisma.ride.findUnique({
       where: { id: rideId },
-      include: {
-        rider: { select: { id: true, name: true } },
-        driver: { select: { id: true, name: true } },
-      },
+      include: activeRideInclude,
     });
     emitRideUpdate(rideId, { rideId, status: 'COMPLETED', ride: full });
     res.json(full);
@@ -487,6 +654,7 @@ router.post('/:id/cancel', requireAuth, async (req, res, next) => {
       include: {
         rider: { select: { id: true, name: true } },
         driver: { select: { id: true, name: true } },
+        rating: rideRatingSelect,
       },
     });
     emitRideUpdate(rideId, { rideId, status: 'CANCELLED', ride: updated });
