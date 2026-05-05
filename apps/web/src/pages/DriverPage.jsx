@@ -95,6 +95,7 @@ export default function DriverPage({
   activeRide,
   rideHistory,
   fetchRideDashboard,
+  setActiveRide,
   navigateToPage,
   setAuthUser,
 }) {
@@ -139,8 +140,14 @@ export default function DriverPage({
   const popupTimerRef = useRef(null)
   const navStepIndexRef = useRef(0)
   const nearSpokenForStepRef = useRef(new Set())
-  const routeFetchMetaRef = useRef({ rideKey: '', lastAt: 0 })
+  const routeFetchMetaRef = useRef({
+    rideKey: '',
+    lastAt: 0,
+    lastRouteDriverLat: null,
+    lastRouteDriverLng: null,
+  })
   const routeThrottleTimerRef = useRef(null)
+  const rideRefreshTimerRef = useRef(null)
   const prevNavRideIdRef = useRef(null)
   const navStepsSigRef = useRef('')
   const prevGeoForBearingRef = useRef(null)
@@ -149,8 +156,10 @@ export default function DriverPage({
   const profile = authUser?.driverProfile
   const isApproved = profile?.verificationStatus === 'APPROVED'
   const isOnline = Boolean(profile?.isOnline)
-  const fullMapMode =
-    isApproved && isOnline && Boolean(mapboxAccessToken) && !mapWebGlError
+  // Show the map as the primary full-screen surface whenever the driver
+  // is approved and Mapbox is configured; online/offline just changes state,
+  // not the layout.
+  const fullMapMode = Boolean(mapboxAccessToken) && isApproved && !mapWebGlError
 
   driverBasemapModeRef.current = driverBasemapMode
   driverTrafficOnRef.current = driverTrafficOn
@@ -257,7 +266,7 @@ export default function DriverPage({
   }, [isOnline, isApproved, authToken, mergeProfile])
 
   useEffect(() => {
-    if (!isOnline || !isApproved || !mapboxAccessToken) {
+    if (!isApproved || !mapboxAccessToken) {
       return undefined
     }
 
@@ -344,7 +353,7 @@ export default function DriverPage({
   }, [isOnline, isApproved, mapboxAccessToken, darkMode, driverBasemapMode])
 
   useEffect(() => {
-    if (!mapRef.current || !isOnline || !isApproved) return
+    if (!mapRef.current || !isApproved) return
     const map = mapRef.current
     const applyTraffic = () => {
       if (driverTrafficOn) addTrafficToMap(map)
@@ -385,8 +394,8 @@ export default function DriverPage({
     if (!turnByNav) {
       smoothedBearingRef.current = 0
       try {
-        map.easeTo({
-          center: [liveLocation.lng, liveLocation.lat],
+    map.easeTo({
+      center: [liveLocation.lng, liveLocation.lat],
           bearing: 0,
           pitch: 0,
           duration: 550,
@@ -456,7 +465,20 @@ export default function DriverPage({
       return undefined
     }
 
-    const rideKey = `${activeRide.id}|${activeRide.status}|${activeRide.pickupLat.toFixed(5)},${activeRide.pickupLng.toFixed(5)}|${activeRide.dropoffLat.toFixed(5)},${activeRide.dropoffLng.toFixed(5)}`
+    const pLat = Number(activeRide.pickupLat)
+    const pLng = Number(activeRide.pickupLng)
+    const dLat = Number(activeRide.dropoffLat)
+    const dLng = Number(activeRide.dropoffLng)
+    if (
+      !Number.isFinite(pLat) ||
+      !Number.isFinite(pLng) ||
+      !Number.isFinite(dLat) ||
+      !Number.isFinite(dLng)
+    ) {
+      return undefined
+    }
+
+    const rideKey = `${activeRide.id}|${activeRide.status}|${pLat.toFixed(5)},${pLng.toFixed(5)}|${dLat.toFixed(5)},${dLng.toFixed(5)}`
     let cancelled = false
 
     const clearThrottle = () => {
@@ -474,9 +496,7 @@ export default function DriverPage({
       try {
         const from = `${loc.lng},${loc.lat}`
         const routeTarget =
-          activeRide.status === 'STARTED'
-            ? `${activeRide.dropoffLng},${activeRide.dropoffLat}`
-            : `${activeRide.pickupLng},${activeRide.pickupLat}`
+          activeRide.status === 'STARTED' ? `${dLng},${dLat}` : `${pLng},${pLat}`
         const url = `https://api.mapbox.com/directions/v5/mapbox/driving/${from};${routeTarget}?geometries=geojson&overview=full&steps=true&voice_instructions=true&alternatives=false&access_token=${mapboxAccessToken}`
 
         const response = await fetch(url)
@@ -550,29 +570,64 @@ export default function DriverPage({
           mapNow.once('style.load', ensureLayer)
         }
 
-        routeFetchMetaRef.current = { rideKey, lastAt: Date.now() }
+        const locAfter = liveLocationRef.current
+        routeFetchMetaRef.current = {
+          rideKey,
+          lastAt: Date.now(),
+          lastRouteDriverLat: locAfter?.lat ?? null,
+          lastRouteDriverLng: locAfter?.lng ?? null,
+        }
       } catch {
         /* ignore transient routing errors */
       }
     }
 
+    /** Trip target is only id/status/pickup/dropoff; driver motion/time still need fresh geometry. */
+    const ROUTE_REFETCH_MOVE_M = 48
+    const ROUTE_REFETCH_MAX_MS = 5000
+
     const meta = routeFetchMetaRef.current
-    if (meta.rideKey !== rideKey) {
-      routeFetchMetaRef.current = { rideKey, lastAt: 0 }
+    const locNow = liveLocationRef.current
+    let driverMovedM = 0
+    if (
+      locNow &&
+      meta.lastRouteDriverLat != null &&
+      meta.lastRouteDriverLng != null &&
+      Number.isFinite(meta.lastRouteDriverLat) &&
+      Number.isFinite(meta.lastRouteDriverLng)
+    ) {
+      driverMovedM = haversineMeters(
+        locNow.lat,
+        locNow.lng,
+        meta.lastRouteDriverLat,
+        meta.lastRouteDriverLng,
+      )
+    }
+
+    const tripTargetChanged = meta.rideKey !== rideKey
+    const intervalElapsed = Date.now() - meta.lastAt >= ROUTE_REFETCH_MAX_MS
+    const shouldFetchNow =
+      tripTargetChanged || driverMovedM >= ROUTE_REFETCH_MOVE_M || intervalElapsed
+
+    if (tripTargetChanged) {
+      routeFetchMetaRef.current = {
+        rideKey,
+        lastAt: 0,
+        lastRouteDriverLat: null,
+        lastRouteDriverLng: null,
+      }
+    }
+
+    if (shouldFetchNow) {
       clearThrottle()
       void runFetch()
     } else {
       const elapsed = Date.now() - meta.lastAt
-      if (elapsed >= 7500) {
-        clearThrottle()
+      clearThrottle()
+      routeThrottleTimerRef.current = window.setTimeout(() => {
+        routeThrottleTimerRef.current = null
         void runFetch()
-      } else {
-        clearThrottle()
-        routeThrottleTimerRef.current = window.setTimeout(() => {
-          routeThrottleTimerRef.current = null
-          void runFetch()
-        }, 7500 - elapsed)
-      }
+      }, Math.max(400, ROUTE_REFETCH_MAX_MS - elapsed))
     }
 
     return () => {
@@ -608,12 +663,15 @@ export default function DriverPage({
       return undefined
     }
 
-    const { pickupLng, pickupLat, dropoffLng, dropoffLat } = activeRide
+    const pickupLng = Number(activeRide.pickupLng)
+    const pickupLat = Number(activeRide.pickupLat)
+    const dropoffLng = Number(activeRide.dropoffLng)
+    const dropoffLat = Number(activeRide.dropoffLat)
     if (
-      typeof pickupLng !== 'number' ||
-      typeof pickupLat !== 'number' ||
-      typeof dropoffLng !== 'number' ||
-      typeof dropoffLat !== 'number'
+      !Number.isFinite(pickupLng) ||
+      !Number.isFinite(pickupLat) ||
+      !Number.isFinite(dropoffLng) ||
+      !Number.isFinite(dropoffLat)
     ) {
       clearPlanned()
       return undefined
@@ -852,7 +910,8 @@ export default function DriverPage({
     setActionBusy(true)
     setStatusNote('')
     try {
-      await acceptRide(authToken, id)
+      const ride = await acceptRide(authToken, id)
+      if (ride?.id) setActiveRide(ride)
       setOfferId('')
       setOfferPopup(null)
       await fetchRideDashboard()
@@ -869,7 +928,8 @@ export default function DriverPage({
     setActionBusy(true)
     setStatusNote('')
     try {
-      await acceptRide(authToken, id)
+      const ride = await acceptRide(authToken, id)
+      if (ride?.id) setActiveRide(ride)
       setOfferId('')
       setOfferPopup(null)
       await fetchRideDashboard()
@@ -956,6 +1016,10 @@ export default function DriverPage({
 
       const nextPickupLat = Number(payload.pickupLat)
       const nextPickupLng = Number(payload.pickupLng)
+      const nextDropLat =
+        payload.dropoffLat != null ? Number(payload.dropoffLat) : Number.NaN
+      const nextDropLng =
+        payload.dropoffLng != null ? Number(payload.dropoffLng) : Number.NaN
       const hasNextCoords = Number.isFinite(nextPickupLat) && Number.isFinite(nextPickupLng)
       const pickupMoved =
         hasNextCoords &&
@@ -965,17 +1029,59 @@ export default function DriverPage({
         typeof payload.pickupAddress === 'string' &&
         payload.pickupAddress.trim() &&
         payload.pickupAddress.trim() !== String(current.pickupAddress ?? '').trim()
+      const dropAddrChanged =
+        typeof payload.dropoffAddress === 'string' &&
+        payload.dropoffAddress.trim() &&
+        payload.dropoffAddress.trim() !== String(current.dropoffAddress ?? '').trim()
 
-      if (pickupMoved || addrChanged) {
-        setPickupMovedToast('Rider moved pickup. Route updated.')
+      if (hasNextCoords) {
+        setActiveRide((prev) => {
+          if (!prev || prev.id !== payload.rideId) return prev
+          const merged = {
+            ...prev,
+            pickupLat: nextPickupLat,
+            pickupLng: nextPickupLng,
+          }
+          if (typeof payload.pickupAddress === 'string' && payload.pickupAddress.trim()) {
+            merged.pickupAddress = payload.pickupAddress.trim()
+          }
+          if (Number.isFinite(nextDropLat) && Number.isFinite(nextDropLng)) {
+            merged.dropoffLat = nextDropLat
+            merged.dropoffLng = nextDropLng
+          }
+          if (typeof payload.dropoffAddress === 'string' && payload.dropoffAddress.trim()) {
+            merged.dropoffAddress = payload.dropoffAddress.trim()
+          }
+          if (payload.fareEstimate != null && Number.isFinite(Number(payload.fareEstimate))) {
+            merged.fareEstimate = Number(payload.fareEstimate)
+          }
+          return merged
+        })
+      }
+
+      if (pickupMoved || addrChanged || dropAddrChanged) {
+        setPickupMovedToast(
+          pickupMoved || addrChanged ? 'Rider moved pickup. Route updated.' : 'Trip details updated.',
+        )
+        if (rideRefreshTimerRef.current != null) {
+          window.clearTimeout(rideRefreshTimerRef.current)
+        }
+        rideRefreshTimerRef.current = window.setTimeout(() => {
+          rideRefreshTimerRef.current = null
+          void fetchRideDashboard()
+        }, 220)
       }
     })
 
     return () => {
       driverMainSocketRef.current = null
+      if (rideRefreshTimerRef.current != null) {
+        window.clearTimeout(rideRefreshTimerRef.current)
+        rideRefreshTimerRef.current = null
+      }
       socket.disconnect()
     }
-  }, [authToken, authUser?.role])
+  }, [authToken, authUser?.role, fetchRideDashboard])
 
   useEffect(() => {
     if (!isOnline || !liveLocation) return undefined
@@ -1610,23 +1716,23 @@ export default function DriverPage({
         </>
       ) : (
         <div className="mx-auto flex max-w-6xl flex-col gap-6 px-4 pb-20 pt-2 sm:px-6 lg:grid lg:grid-cols-[minmax(0,1fr)_minmax(280px,380px)] lg:items-start lg:gap-8 lg:pb-16 lg:pt-0">
-          <div className="order-2 flex flex-col gap-6 lg:order-1">
-            <div className="flex flex-wrap items-end justify-between gap-4">
-              <div>
+        <div className="order-2 flex flex-col gap-6 lg:order-1">
+          <div className="flex flex-wrap items-end justify-between gap-4">
+            <div>
                 <p className="text-xs font-semibold uppercase tracking-[0.2em] text-[#9d3733]">Driver</p>
                 <h1 className="font-brand text-2xl font-bold sm:text-3xl">Welcome, {authUser.name}</h1>
-                <p className="mt-1 text-sm opacity-80">
-                  {profile.vehicleMake} {profile.vehicleModel} · {profile.licensePlate}
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => navigateToPage('home')}
-                className="rounded-lg border border-[#9d3733]/50 px-4 py-2 text-sm font-bold text-[#9d3733] transition hover:bg-[#9d3733]/10"
-              >
-                Home
-              </button>
+              <p className="mt-1 text-sm opacity-80">
+                {profile.vehicleMake} {profile.vehicleModel} · {profile.licensePlate}
+              </p>
             </div>
+            <button
+              type="button"
+              onClick={() => navigateToPage('home')}
+              className="rounded-lg border border-[#9d3733]/50 px-4 py-2 text-sm font-bold text-[#9d3733] transition hover:bg-[#9d3733]/10"
+            >
+              Home
+            </button>
+          </div>
 
             {isApproved && !isOnline && (
               <div className="flex justify-center py-4 lg:hidden">
@@ -1641,158 +1747,158 @@ export default function DriverPage({
               </div>
             )}
 
-            <div className={cardClass}>
-              <div className="flex flex-wrap items-center justify-between gap-4">
-                <div>
-                  <h2 className="font-accent text-lg font-bold">Availability</h2>
-                  <p className="text-sm opacity-80">
-                    Status:{' '}
-                    <span className="font-semibold text-[#9d3733]">
-                      {isApproved ? (isOnline ? 'Online' : 'Offline') : 'Pending verification'}
-                    </span>
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  disabled={!isApproved || statusBusy}
-                  onClick={() => toggleOnline(!isOnline)}
-                  className={`rounded-full px-5 py-2 text-sm font-bold transition disabled:cursor-not-allowed disabled:opacity-50 ${
-                    isOnline
-                      ? 'bg-[#842f2b] text-[#f2e3bb] hover:bg-[#6f2724]'
-                      : 'bg-[#9d3733] text-[#f2e3bb] hover:bg-[#842f2b]'
-                  }`}
-                >
-                  {statusBusy ? 'Updating…' : isOnline ? 'Go offline' : 'Go online'}
-                </button>
-              </div>
-              {!isApproved && (
-                <p className="mt-3 text-sm text-[#9d3733]">
-                  Your vehicle must be approved before you can go online and accept rides.
+          <div className={cardClass}>
+            <div className="flex flex-wrap items-center justify-between gap-4">
+              <div>
+                <h2 className="font-accent text-lg font-bold">Availability</h2>
+                <p className="text-sm opacity-80">
+                  Status:{' '}
+                  <span className="font-semibold text-[#9d3733]">
+                    {isApproved ? (isOnline ? 'Online' : 'Offline') : 'Pending verification'}
+                  </span>
                 </p>
-              )}
-              {(statusNote || dashboardMessage) && (
-                <div className="mt-3 flex flex-wrap items-start gap-3">
-                  <p className="min-w-0 flex-1 text-sm text-[#9d3733]">
-                    {statusNote || dashboardMessage}
-                  </p>
-                  {statusNote ? (
-                    <button
-                      type="button"
-                      onClick={() => setStatusNote('')}
-                      className="shrink-0 text-xs font-bold text-[#9d3733] underline"
-                    >
-                      Dismiss
-                    </button>
-                  ) : null}
-                </div>
-              )}
-            </div>
-
-            <div className={cardClass}>
-              <h2 className="font-accent text-lg font-bold">Accept a ride by ID</h2>
-              <p className="mt-1 text-sm opacity-80">
-                Paste a ride UUID while online. Notifications also appear when a request arrives.
-              </p>
-              <div className="mt-4 flex flex-col gap-3 sm:flex-row">
-                <input
-                  type="text"
-                  value={offerId}
-                  onChange={(e) => setOfferId(e.target.value)}
-                  placeholder="Ride UUID"
-                  className={`flex-1 rounded-xl border px-4 py-3 text-sm outline-none ${
-                    darkMode
-                      ? 'border-[#9d3733]/45 bg-black text-[#f2e3bb]'
-                      : 'border-[#9d3733]/30 bg-white text-[#2d100f]'
-                  }`}
-                />
-                <button
-                  type="button"
-                  disabled={actionBusy || !offerId.trim() || !isOnline || !isApproved}
-                  onClick={onAcceptOffer}
-                  className="rounded-xl bg-[#9d3733] px-5 py-3 text-sm font-bold text-[#f2e3bb] transition hover:bg-[#842f2b] disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {actionBusy ? 'Working…' : 'Accept'}
-                </button>
               </div>
+              <button
+                type="button"
+                disabled={!isApproved || statusBusy}
+                onClick={() => toggleOnline(!isOnline)}
+                className={`rounded-full px-5 py-2 text-sm font-bold transition disabled:cursor-not-allowed disabled:opacity-50 ${
+                  isOnline
+                    ? 'bg-[#842f2b] text-[#f2e3bb] hover:bg-[#6f2724]'
+                    : 'bg-[#9d3733] text-[#f2e3bb] hover:bg-[#842f2b]'
+                }`}
+              >
+                {statusBusy ? 'Updating…' : isOnline ? 'Go offline' : 'Go online'}
+              </button>
             </div>
+            {!isApproved && (
+              <p className="mt-3 text-sm text-[#9d3733]">
+                Your vehicle must be approved before you can go online and accept rides.
+              </p>
+            )}
+            {(statusNote || dashboardMessage) && (
+              <div className="mt-3 flex flex-wrap items-start gap-3">
+                <p className="min-w-0 flex-1 text-sm text-[#9d3733]">
+                  {statusNote || dashboardMessage}
+                </p>
+                {statusNote ? (
+                  <button
+                    type="button"
+                    onClick={() => setStatusNote('')}
+                      className="shrink-0 text-xs font-bold text-[#9d3733] underline"
+                  >
+                    Dismiss
+                  </button>
+                ) : null}
+              </div>
+            )}
+          </div>
 
-            <div className={cardClass}>
-              <h2 className="font-accent text-lg font-bold">Active trip</h2>
-              {dashboardBusy ? (
-                <p className="mt-2 text-sm opacity-80">Loading…</p>
-              ) : activeRide ? (
-                <div className="mt-3 space-y-2 text-sm">
-                  <p>
-                    <span className="opacity-70">Rider:</span>{' '}
-                    <span className="font-semibold">{activeRide.rider?.name ?? '—'}</span>
-                  </p>
-                  <p>
-                    <span className="opacity-70">Status:</span>{' '}
-                    <span className="font-semibold text-[#9d3733]">{activeRide.status}</span>
-                  </p>
-                  <p>
-                    <span className="opacity-70">Pickup:</span> {activeRide.pickupAddress}
-                  </p>
-                  <p>
-                    <span className="opacity-70">Dropoff:</span> {activeRide.dropoffAddress}
-                  </p>
-                  <div className="flex flex-wrap gap-2 pt-2">
-                    {activeRide.status === 'ACCEPTED' && (
-                      <button
-                        type="button"
-                        disabled={actionBusy}
-                        onClick={onStartTrip}
-                        className="rounded-lg bg-[#9d3733] px-4 py-2 text-sm font-bold text-[#f2e3bb] transition hover:bg-[#842f2b] disabled:opacity-50"
-                      >
-                        Start trip
-                      </button>
-                    )}
-                    {activeRide.status === 'STARTED' && (
-                      <button
-                        type="button"
-                        disabled={actionBusy}
-                        onClick={onCompleteTrip}
-                        className="rounded-lg bg-[#9d3733] px-4 py-2 text-sm font-bold text-[#f2e3bb] transition hover:bg-[#842f2b] disabled:opacity-50"
-                      >
-                        Complete trip
-                      </button>
-                    )}
-                  </div>
-                </div>
-              ) : (
-                <p className="mt-2 text-sm opacity-80">No active trip. Go online to receive requests.</p>
-              )}
-            </div>
-
-            <div className={cardClass}>
-              <h2 className="font-accent text-lg font-bold">Recent trips</h2>
-              {dashboardBusy ? (
-                <p className="mt-2 text-sm opacity-80">Loading…</p>
-              ) : rideHistory.length === 0 ? (
-                <p className="mt-2 text-sm opacity-80">No completed rides yet.</p>
-              ) : (
-                <ul className="mt-3 space-y-2 text-sm">
-                  {rideHistory.slice(0, 8).map((ride) => (
-                    <li
-                      key={ride.id}
-                      className={`rounded-lg border px-3 py-2 ${
-                        darkMode ? 'border-[#9d3733]/30' : 'border-[#9d3733]/20'
-                      }`}
-                    >
-                      <span className="font-semibold text-[#9d3733]">{ride.status}</span>
-                      <span className="mx-2 opacity-40">·</span>
-                      {ride.pickupAddress} → {ride.dropoffAddress}
-                    </li>
-                  ))}
-                </ul>
-              )}
+          <div className={cardClass}>
+            <h2 className="font-accent text-lg font-bold">Accept a ride by ID</h2>
+            <p className="mt-1 text-sm opacity-80">
+                Paste a ride UUID while online. Notifications also appear when a request arrives.
+            </p>
+            <div className="mt-4 flex flex-col gap-3 sm:flex-row">
+              <input
+                type="text"
+                value={offerId}
+                onChange={(e) => setOfferId(e.target.value)}
+                placeholder="Ride UUID"
+                className={`flex-1 rounded-xl border px-4 py-3 text-sm outline-none ${
+                  darkMode
+                    ? 'border-[#9d3733]/45 bg-black text-[#f2e3bb]'
+                    : 'border-[#9d3733]/30 bg-white text-[#2d100f]'
+                }`}
+              />
+              <button
+                type="button"
+                disabled={actionBusy || !offerId.trim() || !isOnline || !isApproved}
+                onClick={onAcceptOffer}
+                className="rounded-xl bg-[#9d3733] px-5 py-3 text-sm font-bold text-[#f2e3bb] transition hover:bg-[#842f2b] disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {actionBusy ? 'Working…' : 'Accept'}
+              </button>
             </div>
           </div>
 
-          <div className="order-1 space-y-3 lg:sticky lg:top-24 lg:order-2">
-            <div className={cardClass}>
-              <h2 className="font-accent text-lg font-bold">Your location</h2>
-              <p className="mt-1 text-sm opacity-80">
+          <div className={cardClass}>
+            <h2 className="font-accent text-lg font-bold">Active trip</h2>
+            {dashboardBusy ? (
+              <p className="mt-2 text-sm opacity-80">Loading…</p>
+            ) : activeRide ? (
+              <div className="mt-3 space-y-2 text-sm">
+                <p>
+                  <span className="opacity-70">Rider:</span>{' '}
+                  <span className="font-semibold">{activeRide.rider?.name ?? '—'}</span>
+                </p>
+                <p>
+                  <span className="opacity-70">Status:</span>{' '}
+                  <span className="font-semibold text-[#9d3733]">{activeRide.status}</span>
+                </p>
+                <p>
+                  <span className="opacity-70">Pickup:</span> {activeRide.pickupAddress}
+                </p>
+                <p>
+                  <span className="opacity-70">Dropoff:</span> {activeRide.dropoffAddress}
+                </p>
+                <div className="flex flex-wrap gap-2 pt-2">
+                  {activeRide.status === 'ACCEPTED' && (
+                    <button
+                      type="button"
+                      disabled={actionBusy}
+                      onClick={onStartTrip}
+                      className="rounded-lg bg-[#9d3733] px-4 py-2 text-sm font-bold text-[#f2e3bb] transition hover:bg-[#842f2b] disabled:opacity-50"
+                    >
+                      Start trip
+                    </button>
+                  )}
+                  {activeRide.status === 'STARTED' && (
+                    <button
+                      type="button"
+                      disabled={actionBusy}
+                      onClick={onCompleteTrip}
+                      className="rounded-lg bg-[#9d3733] px-4 py-2 text-sm font-bold text-[#f2e3bb] transition hover:bg-[#842f2b] disabled:opacity-50"
+                    >
+                      Complete trip
+                    </button>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <p className="mt-2 text-sm opacity-80">No active trip. Go online to receive requests.</p>
+            )}
+          </div>
+
+          <div className={cardClass}>
+            <h2 className="font-accent text-lg font-bold">Recent trips</h2>
+            {dashboardBusy ? (
+              <p className="mt-2 text-sm opacity-80">Loading…</p>
+            ) : rideHistory.length === 0 ? (
+              <p className="mt-2 text-sm opacity-80">No completed rides yet.</p>
+            ) : (
+              <ul className="mt-3 space-y-2 text-sm">
+                {rideHistory.slice(0, 8).map((ride) => (
+                  <li
+                    key={ride.id}
+                    className={`rounded-lg border px-3 py-2 ${
+                      darkMode ? 'border-[#9d3733]/30' : 'border-[#9d3733]/20'
+                    }`}
+                  >
+                    <span className="font-semibold text-[#9d3733]">{ride.status}</span>
+                    <span className="mx-2 opacity-40">·</span>
+                    {ride.pickupAddress} → {ride.dropoffAddress}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+
+        <div className="order-1 space-y-3 lg:sticky lg:top-24 lg:order-2">
+          <div className={cardClass}>
+            <h2 className="font-accent text-lg font-bold">Your location</h2>
+            <p className="mt-1 text-sm opacity-80">
                 Go online for a full-screen map with live GPS. Tools open from the bottom bar.
               </p>
               {isApproved && mapboxAccessToken ? (
@@ -1812,25 +1918,25 @@ export default function DriverPage({
                   className="mt-3"
                 />
               ) : null}
-              {!mapboxAccessToken ? (
-                <div className={`${mapPlaceholderClass} mt-4`}>
-                  <p className="text-[#9d3733]">
-                    Set <code className="rounded bg-black/10 px-1">VITE_MAPBOX_ACCESS_TOKEN</code> in your
-                    web environment to load the map.
-                  </p>
-                </div>
-              ) : !isApproved ? (
-                <div className={`${mapPlaceholderClass} mt-4 opacity-80`}>
-                  Map is available after your driver profile is approved.
-                </div>
-              ) : !isOnline ? (
-                <div className={`${mapPlaceholderClass} mt-4`}>
+            {!mapboxAccessToken ? (
+              <div className={`${mapPlaceholderClass} mt-4`}>
+                <p className="text-[#9d3733]">
+                  Set <code className="rounded bg-black/10 px-1">VITE_MAPBOX_ACCESS_TOKEN</code> in your
+                  web environment to load the map.
+                </p>
+              </div>
+            ) : !isApproved ? (
+              <div className={`${mapPlaceholderClass} mt-4 opacity-80`}>
+                Map is available after your driver profile is approved.
+              </div>
+            ) : !isOnline ? (
+              <div className={`${mapPlaceholderClass} mt-4`}>
                   <p className="font-medium">Go online for full-screen driving map.</p>
-                  <p className="mt-2 text-xs opacity-75">Allow location when your browser asks.</p>
-                </div>
-              ) : mapWebGlError ? (
-                <div className={`${mapPlaceholderClass} mt-4 text-[#9d3733]`}>{mapWebGlError}</div>
-              ) : (
+                <p className="mt-2 text-xs opacity-75">Allow location when your browser asks.</p>
+              </div>
+            ) : mapWebGlError ? (
+              <div className={`${mapPlaceholderClass} mt-4 text-[#9d3733]`}>{mapWebGlError}</div>
+            ) : (
                 <>
                   {driverNavUi ? (
                     <div className="mt-3 flex justify-center">
@@ -1844,12 +1950,12 @@ export default function DriverPage({
                     </div>
                   ) : null}
                   <div className="relative mt-4">
-                  <div
-                    ref={mapContainerRef}
+              <div
+                ref={mapContainerRef}
                     className={`h-[min(52vh,440px)] w-full overflow-hidden rounded-2xl border ${
-                      darkMode ? 'border-[#9d3733]/40' : 'border-[#9d3733]/30'
-                    }`}
-                  />
+                  darkMode ? 'border-[#9d3733]/40' : 'border-[#9d3733]/30'
+                }`}
+              />
                   {activeRide?.status === 'ACCEPTED' && (
                     <div
                       className={`pointer-events-none absolute left-3 top-3 rounded-full border px-3 py-1 text-xs font-semibold ${
@@ -1874,15 +1980,15 @@ export default function DriverPage({
                   )}
                 </div>
                 </>
-              )}
-              {isOnline && isApproved && liveLocation && (
-                <p className="mt-3 font-mono text-xs opacity-80">
-                  {liveLocation.lat.toFixed(5)}, {liveLocation.lng.toFixed(5)}
-                </p>
-              )}
-            </div>
+            )}
+            {isOnline && isApproved && liveLocation && (
+              <p className="mt-3 font-mono text-xs opacity-80">
+                {liveLocation.lat.toFixed(5)}, {liveLocation.lng.toFixed(5)}
+              </p>
+            )}
           </div>
         </div>
+      </div>
       )}
     </div>
   )

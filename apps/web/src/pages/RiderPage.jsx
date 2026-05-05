@@ -434,7 +434,7 @@ export default function RiderPage({
               ))
             ) : (
               <p className="px-3 py-2 opacity-70">
-                Nearby places appear here, or type at least 3 letters to search worldwide.
+                Nearby places appear here, or type at least 2 letters (for example ULK) to search.
               </p>
             )}
           </div>
@@ -487,7 +487,7 @@ export default function RiderPage({
               ))
             ) : (
               <p className="px-3 py-2 opacity-70">
-                Places near your pickup appear here, or type 3+ letters to search anywhere.
+                Places near your pickup appear here, or type 2+ letters to search anywhere.
               </p>
             )}
           </div>

@@ -38,6 +38,39 @@ const pageToPath = {
   about: '/about',
 }
 
+/** Matches studio hero art / mockup cream so the vehicle plate blends with the page. */
+const WELCOME_CREAM = '#F5EFE6'
+/** Solid panel fill (no transparency). */
+const WELCOME_CONTENT_PANEL_BG = '#FFFCF9'
+
+/** Hero carousel images (JPEG assets in public/). */
+const WELCOME_HERO_SLIDES = [
+  {
+    src: '/hero-suburban-black.jpg',
+    alt: 'Chevrolet Suburban High Country in black, three-quarter front view',
+    objectPosition: '32% 50%',
+    kicker: 'Executive travel',
+    title: 'Arrive composed. Leave the driving to us.',
+    body: 'Discreet airport and hotel transfers with vetted chauffeurs, quiet cabins, and on-time pickup—every mile feels first class.',
+  },
+  {
+    src: '/hero-suburban-red.jpg',
+    alt: 'Chevrolet Suburban High Country in red, side profile',
+    objectPosition: '48% 52%',
+    kicker: 'Groups & events',
+    title: 'Room for seven—without compromising comfort.',
+    body: 'Full-size luxury for families, teams, and celebrations: generous luggage space, climate control, and clear, upfront pricing.',
+  },
+  {
+    src: '/hero-suburban-white.jpg',
+    alt: 'Chevrolet Suburban High Country in white, side profile',
+    objectPosition: '52% 50%',
+    kicker: 'Always on',
+    title: 'Early flights. Late nights. We show up.',
+    body: '24/7 booking support and professional drivers when plans shift—reliable rides when your schedule does not wait.',
+  },
+]
+
 const getPageFromPath = (pathname) => {
   if (pathname === '/rider') return 'rider'
   if (pathname === '/ride') return 'rider'
@@ -75,6 +108,44 @@ function suggestionFromGeocodeFeature(feature, opts = {}) {
     nearYou,
     ...(badge ? { badge } : {}),
   }
+}
+
+/**
+ * Build a specific rider-friendly label from reverse geocoding (POI/street first, then area).
+ * Example: "AEBR Church, Minmarket, Gisenyi"
+ */
+function reverseFeatureToLabel(feature) {
+  if (!feature || typeof feature !== 'object') return null
+  const text = typeof feature.text === 'string' ? feature.text.trim() : ''
+  const placeName = typeof feature.place_name === 'string' ? feature.place_name.trim() : ''
+  const context = Array.isArray(feature.context) ? feature.context : []
+  const contextNames = []
+  for (const c of context) {
+    const id = typeof c?.id === 'string' ? c.id : ''
+    const value = typeof c?.text === 'string' ? c.text.trim() : ''
+    if (!value) continue
+    if (
+      id.startsWith('address.') ||
+      id.startsWith('neighborhood.') ||
+      id.startsWith('locality.') ||
+      id.startsWith('place.') ||
+      id.startsWith('region.')
+    ) {
+      contextNames.push(value)
+    }
+  }
+  const merged = [text, ...contextNames].filter(Boolean)
+  const unique = []
+  const seen = new Set()
+  for (const p of merged) {
+    const k = p.toLowerCase()
+    if (seen.has(k)) continue
+    seen.add(k)
+    unique.push(p)
+  }
+  const label = unique.slice(0, 3).join(', ')
+  if (label) return label
+  return placeName || text || null
 }
 
 function dedupeSuggestionsById(list) {
@@ -118,6 +189,7 @@ function App() {
   const [authBusy, setAuthBusy] = useState(false)
   const [authModalOpen, setAuthModalOpen] = useState(false)
   const [userMenuOpen, setUserMenuOpen] = useState(false)
+  const [mobileNavOpen, setMobileNavOpen] = useState(false)
   const [activePage, setActivePage] = useState(() => getPageFromPath(window.location.pathname))
   const [profileForm, setProfileForm] = useState({ name: '', phone: '' })
   const [profileBusy, setProfileBusy] = useState(false)
@@ -126,6 +198,9 @@ function App() {
   const [riderMessage, setRiderMessage] = useState('')
   const [activeRide, setActiveRide] = useState(null)
   const activeRideRef = useRef(null)
+  /** Last server pickup/drop signature applied to the rider map (avoids stale markers vs `activeRide`). */
+  const rideMapServerCoordsRef = useRef(null)
+  const authTokenRef = useRef(null)
   const [rideHistory, setRideHistory] = useState([])
   const [riderForm, setRiderForm] = useState({
     pickupAddress: '',
@@ -133,18 +208,37 @@ function App() {
     when: 'Pickup now',
     riderFor: 'For me',
   })
-  const [homeEstimateForm, setHomeEstimateForm] = useState({
-    pickupAddress: '',
-    dropoffAddress: '',
-    scheduleAt: '',
-  })
-  const [homeEstimateError, setHomeEstimateError] = useState('')
-  const [homePickupSuggestions, setHomePickupSuggestions] = useState([])
-  const [homeDropoffSuggestions, setHomeDropoffSuggestions] = useState([])
-  const [homePickupSearchBusy, setHomePickupSearchBusy] = useState(false)
-  const [homeDropoffSearchBusy, setHomeDropoffSearchBusy] = useState(false)
-  const [showHomePickupSuggestions, setShowHomePickupSuggestions] = useState(false)
-  const [showHomeDropoffSuggestions, setShowHomeDropoffSuggestions] = useState(false)
+  const riderFormRef = useRef(riderForm)
+  const [welcomeSlideIndex, setWelcomeSlideIndex] = useState(0)
+  const welcomeTouchStartXRef = useRef(null)
+
+  useEffect(() => {
+    if (WELCOME_HERO_SLIDES.length < 2) return
+    let id = null
+    const start = () => {
+      if (id != null) return
+      id = window.setInterval(() => {
+        setWelcomeSlideIndex((i) => (i + 1) % WELCOME_HERO_SLIDES.length)
+      }, 5500)
+    }
+    const stop = () => {
+      if (id != null) {
+        window.clearInterval(id)
+        id = null
+      }
+    }
+    const onVisibility = () => {
+      if (document.hidden) stop()
+      else start()
+    }
+    if (!document.hidden) start()
+    document.addEventListener('visibilitychange', onVisibility)
+    return () => {
+      stop()
+      document.removeEventListener('visibilitychange', onVisibility)
+    }
+  }, [])
+
   const [riderCoords, setRiderCoords] = useState({
     pickup: { lat: -1.9441, lng: 30.0619 },
     dropoff: { lat: -1.9536, lng: 30.0925 },
@@ -179,8 +273,6 @@ function App() {
   const pickupFollowsDeviceGpsRef = useRef(true)
   /** Latest device GPS (always updated) — biases search & “near you” rows. */
   const riderGeolocationRef = useRef(null)
-  const homeGeoRef = useRef(null)
-  const homePickupCoordsRef = useRef(null)
   const lastRiderPickupSnapRef = useRef(0)
   const lastRiderPickupGeocodeRef = useRef(0)
   const routeOptionsSourceIdRef = useRef('ride-route-options-source')
@@ -280,22 +372,113 @@ function App() {
   const searchLocationSuggestions = useCallback(
     async (query, biasCoords) => {
       if (!mapboxAccessToken || !query?.trim()) return []
-      const encoded = encodeURIComponent(query.trim())
-      let url = `https://api.mapbox.com/geocoding/v5/mapbox.places/${encoded}.json?autocomplete=true&limit=12&access_token=${mapboxAccessToken}`
-      if (
+      const q = query.trim()
+      const encoded = encodeURIComponent(q)
+      const types = 'poi,address,neighborhood,locality,place'
+      const baseUrl = `https://api.mapbox.com/geocoding/v5/mapbox.places/${encoded}.json`
+      const biasValid =
         biasCoords &&
         Number.isFinite(biasCoords.lng) &&
         Number.isFinite(biasCoords.lat)
-      ) {
-        url += `&proximity=${biasCoords.lng},${biasCoords.lat}`
+      const biasProximity = biasValid ? `&proximity=${biasCoords.lng},${biasCoords.lat}` : ''
+      const rwBbox = '28.85,-2.85,30.95,-1.00'
+      const localBbox = biasValid
+        ? `&bbox=${(biasCoords.lng - 0.22).toFixed(6)},${(biasCoords.lat - 0.22).toFixed(6)},${(biasCoords.lng + 0.22).toFixed(6)},${(biasCoords.lat + 0.22).toFixed(6)}`
+        : ''
+      const searchUrlNearby = `${baseUrl}?autocomplete=true&limit=12&types=${types}&language=en&country=rw${biasProximity}&access_token=${mapboxAccessToken}`
+      const searchUrlLocalBox = `${baseUrl}?autocomplete=true&limit=12&types=${types}&language=en&country=rw${localBbox}&access_token=${mapboxAccessToken}`
+      const searchUrlRwanda = `${baseUrl}?autocomplete=true&limit=12&types=${types}&language=en&country=rw&bbox=${rwBbox}&access_token=${mapboxAccessToken}`
+      const searchUrlGlobal = `${baseUrl}?autocomplete=true&limit=12&types=${types}&language=en&access_token=${mapboxAccessToken}`
+      const loadNearby = async () => {
+        if (!biasValid) return []
+        const { lng, lat } = biasCoords
+        const nearbyUrl = `https://api.mapbox.com/geocoding/v5/mapbox.places/${lng},${lat}.json?limit=10&types=poi,address,place,locality,neighborhood&access_token=${mapboxAccessToken}`
+        const nearbyResponse = await fetch(nearbyUrl)
+        if (!nearbyResponse.ok) return []
+        const nearbyData = await nearbyResponse.json()
+        const nearbyFeatures = Array.isArray(nearbyData?.features) ? nearbyData.features : []
+        return dedupeSuggestionsById(
+          nearbyFeatures.map((feature) => suggestionFromGeocodeFeature(feature)).filter(Boolean),
+        )
       }
-      const response = await fetch(url)
-      if (!response.ok) return []
-      const data = await response.json()
-      const features = Array.isArray(data?.features) ? data.features : []
-      return dedupeSuggestionsById(
-        features.map((feature) => suggestionFromGeocodeFeature(feature)).filter(Boolean),
-      )
+      const [nearbyResponse, localBoxResponse, rwandaResponse, globalResponse, nearby] = await Promise.all([
+        fetch(searchUrlNearby),
+        fetch(searchUrlLocalBox),
+        fetch(searchUrlRwanda),
+        fetch(searchUrlGlobal),
+        loadNearby(),
+      ])
+      const localMatches = (nearby ?? []).filter((s) => {
+        const hay = `${s?.name ?? ''} ${s?.placeName ?? ''}`.toLowerCase()
+        return hay.includes(q.toLowerCase())
+      })
+      const localTagged = localMatches.map((s) => ({
+        ...s,
+        badge: s.badge ?? 'Nearby match',
+      }))
+
+      const parseRemote = async (res, badge) => {
+        if (!res.ok) return []
+        const data = await res.json()
+        const features = Array.isArray(data?.features) ? data.features : []
+        return features
+          .map((feature) => suggestionFromGeocodeFeature(feature))
+          .filter(Boolean)
+          .map((s) => ({ ...s, ...(badge ? { badge } : {}) }))
+      }
+      const [nearbyRemote, localBoxRemote, rwandaRemote, globalRemote] = await Promise.all([
+        parseRemote(nearbyResponse, ''),
+        parseRemote(localBoxResponse, 'Nearby area'),
+        parseRemote(rwandaResponse, 'Rwanda'),
+        parseRemote(globalResponse, ''),
+      ])
+
+      const combined = dedupeSuggestionsById([
+        ...localTagged,
+        ...nearbyRemote,
+        ...localBoxRemote,
+        ...rwandaRemote,
+        ...globalRemote,
+      ])
+
+      const qLower = q.toLowerCase()
+      const scoreSuggestion = (s) => {
+        const name = String(s?.name ?? '').toLowerCase()
+        const placeName = String(s?.placeName ?? '').toLowerCase()
+        const inRwanda = placeName.includes('rwanda')
+        const starts = name.startsWith(qLower) || placeName.startsWith(qLower)
+        const contains = name.includes(qLower) || placeName.includes(qLower)
+        const nearBoost = s?.badge === 'Nearby match' || s?.badge === 'Nearby area'
+        let distancePenalty = 0
+        if (biasValid && Number.isFinite(s?.coords?.lat) && Number.isFinite(s?.coords?.lng)) {
+          const km = haversineMeters(biasCoords.lat, biasCoords.lng, s.coords.lat, s.coords.lng) / 1000
+          distancePenalty = Math.min(20, km / 6)
+        }
+        return (
+          (starts ? 50 : 0) +
+          (contains ? 25 : 0) +
+          (nearBoost ? 18 : 0) +
+          (inRwanda ? 12 : 0) -
+          distancePenalty
+        )
+      }
+
+      const ranked = [...combined].sort((a, b) => scoreSuggestion(b) - scoreSuggestion(a))
+      if (ranked.length > 0) {
+        // Prefer Rwanda/nearby matches first when available.
+        const localFirst = ranked.filter(
+          (s) =>
+            String(s?.placeName ?? '').toLowerCase().includes('rwanda') ||
+            s?.badge === 'Nearby match' ||
+            s?.badge === 'Nearby area',
+        )
+        if (localFirst.length > 0) {
+          const finalList = dedupeSuggestionsById([...localFirst, ...ranked])
+          return finalList.slice(0, 12)
+        }
+        return ranked.slice(0, 12)
+      }
+      return dedupeSuggestionsById(localTagged).slice(0, 12)
     },
     [mapboxAccessToken],
   )
@@ -584,12 +767,23 @@ function App() {
     async (coords) => {
       if (!mapboxAccessToken) return null
       const response = await fetch(
-        `https://api.mapbox.com/geocoding/v5/mapbox.places/${coords.lng},${coords.lat}.json?limit=1&access_token=${mapboxAccessToken}`,
+        `https://api.mapbox.com/geocoding/v5/mapbox.places/${coords.lng},${coords.lat}.json?limit=5&types=poi,address,neighborhood,locality,place&language=en&access_token=${mapboxAccessToken}`,
       )
       if (!response.ok) return null
       const data = await response.json()
-      const placeName = data?.features?.[0]?.place_name
-      return typeof placeName === 'string' ? placeName : null
+      const features = Array.isArray(data?.features) ? data.features : []
+      if (features.length === 0) return null
+      const rank = (f) => {
+        const types = Array.isArray(f?.place_type) ? f.place_type : []
+        if (types.includes('poi')) return 0
+        if (types.includes('address')) return 1
+        if (types.includes('neighborhood')) return 2
+        if (types.includes('locality')) return 3
+        if (types.includes('place')) return 4
+        return 9
+      }
+      const best = [...features].sort((a, b) => rank(a) - rank(b))[0]
+      return reverseFeatureToLabel(best)
     },
     [mapboxAccessToken],
   )
@@ -601,6 +795,8 @@ function App() {
   riderTrafficOnRef.current = riderTrafficOn
   riderCoordsRef.current = riderCoords
   activeRideRef.current = activeRide
+  authTokenRef.current = authToken
+  riderFormRef.current = riderForm
   routeOptionsRef.current = routeOptions
   selectedRouteIndexRef.current = selectedRouteIndex
 
@@ -808,6 +1004,10 @@ function App() {
   }, [userMenuOpen])
 
   useEffect(() => {
+    setMobileNavOpen(false)
+  }, [activePage])
+
+  useEffect(() => {
     setProfileForm({
       name: authUser?.name ?? '',
       phone: authUser?.phone ?? '',
@@ -879,6 +1079,63 @@ function App() {
 
     return () => window.clearInterval(pollId)
   }, [activePage, authToken, fetchRiderData, activeRide?.status])
+
+  /** Keep map pins + blue trip line aligned with the server ride; green driver→pickup uses `activeRide` coords. */
+  useEffect(() => {
+    if (activePage !== 'rider') return
+    const ride = activeRide
+    if (!ride || !['REQUESTED', 'ACCEPTED', 'STARTED'].includes(ride.status)) {
+      rideMapServerCoordsRef.current = null
+      return
+    }
+
+    const plat = Number(ride.pickupLat)
+    const plng = Number(ride.pickupLng)
+    const dlat = Number(ride.dropoffLat)
+    const dlng = Number(ride.dropoffLng)
+    if (![plat, plng, dlat, dlng].every(Number.isFinite)) return
+
+    const signature = `${ride.id}|${plat}|${plng}|${dlat}|${dlng}`
+    const prevSig = rideMapServerCoordsRef.current
+    if (prevSig === signature) return
+
+    const pickupDrift = haversineMeters(riderCoords.pickup.lat, riderCoords.pickup.lng, plat, plng)
+    const dropDrift = haversineMeters(riderCoords.dropoff.lat, riderCoords.dropoff.lng, dlat, dlng)
+    const idChanged = prevSig == null || !prevSig.startsWith(`${ride.id}|`)
+
+    if (pickupDrift > 35 || dropDrift > 35 || idChanged) {
+      setRiderCoords({
+        pickup: { lat: plat, lng: plng },
+        dropoff: { lat: dlat, lng: dlng },
+      })
+    }
+
+    const pAddr = typeof ride.pickupAddress === 'string' ? ride.pickupAddress.trim() : ''
+    const dAddr = typeof ride.dropoffAddress === 'string' ? ride.dropoffAddress.trim() : ''
+    if (pAddr || dAddr) {
+      setRiderForm((prev) => ({
+        ...prev,
+        ...(pAddr ? { pickupAddress: pAddr } : {}),
+        ...(dAddr ? { dropoffAddress: dAddr } : {}),
+      }))
+    }
+
+    rideMapServerCoordsRef.current = signature
+  }, [
+    activePage,
+    activeRide?.id,
+    activeRide?.status,
+    activeRide?.pickupLat,
+    activeRide?.pickupLng,
+    activeRide?.dropoffLat,
+    activeRide?.dropoffLng,
+    activeRide?.pickupAddress,
+    activeRide?.dropoffAddress,
+    riderCoords.pickup.lat,
+    riderCoords.pickup.lng,
+    riderCoords.dropoff.lat,
+    riderCoords.dropoff.lng,
+  ])
 
   useEffect(() => {
     if (activePage === 'rider') {
@@ -1101,6 +1358,32 @@ function App() {
     activeRide?.rating,
   ])
 
+  /** Driver: stay subscribed to the active ride room so pickup/dropoff updates match the server (same as rider `ride:status`). */
+  useEffect(() => {
+    if (activePage !== 'driver' || !authToken || authUser?.role !== 'DRIVER') return undefined
+    const rideId = activeRide?.id
+    if (!rideId) return undefined
+
+    const socket = io(import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:3000', {
+      auth: { token: authToken },
+      transports: ['websocket'],
+    })
+
+    const onRideStatus = (p) => {
+      if (p?.rideId !== rideId || !p?.ride) return
+      setActiveRide(p.ride)
+    }
+
+    socket.on('connect', () => {
+      socket.emit('ride:subscribe', { rideId })
+    })
+    socket.on('ride:status', onRideStatus)
+
+    return () => {
+      socket.disconnect()
+    }
+  }, [activePage, authToken, authUser?.role, activeRide?.id])
+
   useEffect(() => {
     if (activePage === 'driver' && authToken && authUser?.role === 'DRIVER') {
       fetchRiderData()
@@ -1111,7 +1394,7 @@ function App() {
     if (activePage !== 'rider' || !showPickupSuggestions) return
     const query = riderForm.pickupAddress.trim()
     let cancelled = false
-    const delay = query.length < 3 ? 200 : 500
+    const delay = query.length < 2 ? 200 : 500
 
     const timeout = window.setTimeout(async () => {
       try {
@@ -1119,7 +1402,7 @@ function App() {
         const geo = riderGeolocationRef.current
         const bias = geo ?? riderCoordsRef.current.pickup
 
-        if (query.length < 3) {
+        if (query.length < 2) {
           if (!mapboxAccessToken) {
             if (!cancelled) setPickupSuggestions([])
             return
@@ -1142,7 +1425,14 @@ function App() {
           return
         }
 
-        const suggestions = await searchLocationSuggestions(query, geo ?? bias)
+        let suggestions = await searchLocationSuggestions(query, geo ?? bias)
+        if (suggestions.length === 0) {
+          const nearbyFallback = await fetchNearbyLocationSuggestions(geo ?? bias)
+          suggestions = nearbyFallback.map((s) => ({
+            ...s,
+            badge: s.badge ?? 'Nearby area',
+          }))
+        }
         if (!cancelled) setPickupSuggestions(suggestions)
       } finally {
         if (!cancelled) setPickupSearchBusy(false)
@@ -1166,14 +1456,14 @@ function App() {
     if (activePage !== 'rider' || !showDropoffSuggestions) return
     const query = riderForm.dropoffAddress.trim()
     let cancelled = false
-    const delay = query.length < 3 ? 200 : 500
+    const delay = query.length < 2 ? 200 : 500
     const pickupPivot = riderCoordsRef.current.pickup
 
     const timeout = window.setTimeout(async () => {
       try {
         setDropoffSearchBusy(true)
 
-        if (query.length < 3) {
+        if (query.length < 2) {
           if (!mapboxAccessToken) {
             if (!cancelled) setDropoffSuggestions([])
             return
@@ -1187,7 +1477,14 @@ function App() {
           return
         }
 
-        const suggestions = await searchLocationSuggestions(query, pickupPivot)
+        let suggestions = await searchLocationSuggestions(query, pickupPivot)
+        if (suggestions.length === 0) {
+          const nearbyFallback = await fetchNearbyLocationSuggestions(pickupPivot)
+          suggestions = nearbyFallback.map((s) => ({
+            ...s,
+            badge: s.badge ?? 'Near pickup',
+          }))
+        }
         if (!cancelled) setDropoffSuggestions(suggestions)
       } finally {
         if (!cancelled) setDropoffSearchBusy(false)
@@ -1218,137 +1515,6 @@ function App() {
       setDropoffSearchBusy(false)
     }
   }, [showDropoffSuggestions])
-
-  useEffect(() => {
-    if (typeof window === 'undefined' || !navigator.geolocation) return
-    if (activePage !== 'home') {
-      return undefined
-    }
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        homeGeoRef.current = {
-          lat: Number(pos.coords.latitude.toFixed(6)),
-          lng: Number(pos.coords.longitude.toFixed(6)),
-        }
-      },
-      () => {
-        homeGeoRef.current = null
-      },
-      { maximumAge: 120_000, enableHighAccuracy: false, timeout: 12_000 },
-    )
-    return undefined
-  }, [activePage])
-
-  useEffect(() => {
-    if (activePage !== 'home' || !showHomePickupSuggestions) return
-    const query = homeEstimateForm.pickupAddress.trim()
-    let cancelled = false
-    const delay = query.length < 3 ? 200 : 500
-
-    const timeout = window.setTimeout(async () => {
-      try {
-        setHomePickupSearchBusy(true)
-        const geo = homeGeoRef.current
-
-        if (query.length < 3) {
-          if (!mapboxAccessToken) {
-            if (!cancelled) setHomePickupSuggestions([])
-            return
-          }
-          const nearby = await fetchNearbyLocationSuggestions(geo)
-          let list = nearby
-          if (geo) {
-            const label = await reverseGeocodeRef.current?.(geo)
-            const currentRow = {
-              id: '__jo_home_gps__',
-              name: label ?? 'Current location',
-              placeName: label ? `${label} · Near you` : 'Current location · Near you',
-              coords: { ...geo },
-              nearYou: true,
-              badge: 'Near you',
-            }
-            list = dedupeSuggestionsById([currentRow, ...nearby])
-          }
-          if (!cancelled) setHomePickupSuggestions(list)
-          return
-        }
-
-        const suggestions = await searchLocationSuggestions(query, geo)
-        if (!cancelled) setHomePickupSuggestions(suggestions)
-      } finally {
-        if (!cancelled) setHomePickupSearchBusy(false)
-      }
-    }, delay)
-
-    return () => {
-      cancelled = true
-      window.clearTimeout(timeout)
-    }
-  }, [
-    activePage,
-    homeEstimateForm.pickupAddress,
-    mapboxAccessToken,
-    showHomePickupSuggestions,
-    searchLocationSuggestions,
-    fetchNearbyLocationSuggestions,
-  ])
-
-  useEffect(() => {
-    if (activePage !== 'home' || !showHomeDropoffSuggestions) return
-    const query = homeEstimateForm.dropoffAddress.trim()
-    let cancelled = false
-    const delay = query.length < 3 ? 200 : 500
-
-    const timeout = window.setTimeout(async () => {
-      try {
-        setHomeDropoffSearchBusy(true)
-        const pivot = homePickupCoordsRef.current ?? homeGeoRef.current
-
-        if (query.length < 3) {
-          if (!mapboxAccessToken || !pivot) {
-            if (!cancelled) setHomeDropoffSuggestions([])
-            return
-          }
-          const nearby = await fetchNearbyLocationSuggestions(pivot)
-          const tagged = nearby.map((s) => ({
-            ...s,
-            badge: s.badge ?? (homePickupCoordsRef.current ? 'Near pickup' : 'Near you'),
-          }))
-          if (!cancelled) setHomeDropoffSuggestions(tagged)
-          return
-        }
-
-        const suggestions = await searchLocationSuggestions(query, pivot)
-        if (!cancelled) setHomeDropoffSuggestions(suggestions)
-      } finally {
-        if (!cancelled) setHomeDropoffSearchBusy(false)
-      }
-    }, delay)
-
-    return () => {
-      cancelled = true
-      window.clearTimeout(timeout)
-    }
-  }, [
-    activePage,
-    homeEstimateForm.dropoffAddress,
-    mapboxAccessToken,
-    showHomeDropoffSuggestions,
-    searchLocationSuggestions,
-    fetchNearbyLocationSuggestions,
-  ])
-
-  useEffect(() => {
-    if (!showHomePickupSuggestions) {
-      setHomePickupSearchBusy(false)
-    }
-  }, [showHomePickupSuggestions])
-
-  useEffect(() => {
-    if (!showHomeDropoffSuggestions) {
-      setHomeDropoffSearchBusy(false)
-    }
-  }, [showHomeDropoffSuggestions])
 
   const routeOptionFeatures = routeOptions.map((option) => option.feature)
   const selectedRouteFeature =
@@ -1499,6 +1665,34 @@ function App() {
       if (placeName) {
         setRiderForm((prev) => ({ ...prev, pickupAddress: placeName }))
       }
+
+      const ride = activeRideRef.current
+      const token = authTokenRef.current
+      if (token && ride?.id && ['REQUESTED', 'ACCEPTED'].includes(ride.status)) {
+        try {
+          const dropLl = dropoffMarker.getLngLat()
+          const dropRaw = {
+            lat: Number(dropLl.lat.toFixed(6)),
+            lng: Number(dropLl.lng.toFixed(6)),
+          }
+          const nextDrop = await snapToRoadRef.current(dropRaw)
+          dropoffMarker.setLngLat([nextDrop.lng, nextDrop.lat])
+          setRiderCoords((prev) => ({ ...prev, pickup: nextPickup, dropoff: nextDrop }))
+          const pickupAddr = (placeName && placeName.trim()) || riderFormRef.current.pickupAddress.trim()
+          const dropAddr = riderFormRef.current.dropoffAddress.trim()
+          const updated = await updateRideLocations(token, ride.id, {
+            pickupLat: nextPickup.lat,
+            pickupLng: nextPickup.lng,
+            pickupAddress: pickupAddr,
+            dropoffLat: nextDrop.lat,
+            dropoffLng: nextDrop.lng,
+            dropoffAddress: dropAddr,
+          })
+          setActiveRide(updated)
+        } catch (e) {
+          setRiderMessage(e.message || 'Could not update ride location for drivers.')
+        }
+      }
     })
     dropoffMarker.on('drag', () => {
       const next = dropoffMarker.getLngLat()
@@ -1521,6 +1715,34 @@ function App() {
       const placeName = await reverseGeocodeRef.current(nextDropoff)
       if (placeName) {
         setRiderForm((prev) => ({ ...prev, dropoffAddress: placeName }))
+      }
+
+      const ride = activeRideRef.current
+      const token = authTokenRef.current
+      if (token && ride?.id && ['REQUESTED', 'ACCEPTED'].includes(ride.status)) {
+        try {
+          const pickLl = pickupMarker.getLngLat()
+          const pickRaw = {
+            lat: Number(pickLl.lat.toFixed(6)),
+            lng: Number(pickLl.lng.toFixed(6)),
+          }
+          const nextPick = await snapToRoadRef.current(pickRaw)
+          pickupMarker.setLngLat([nextPick.lng, nextPick.lat])
+          setRiderCoords((prev) => ({ ...prev, pickup: nextPick }))
+          const pickupAddr = riderFormRef.current.pickupAddress.trim()
+          const dropAddr = (placeName && placeName.trim()) || riderFormRef.current.dropoffAddress.trim()
+          const updated = await updateRideLocations(token, ride.id, {
+            pickupLat: nextPick.lat,
+            pickupLng: nextPick.lng,
+            pickupAddress: pickupAddr,
+            dropoffLat: nextDropoff.lat,
+            dropoffLng: nextDropoff.lng,
+            dropoffAddress: dropAddr,
+          })
+          setActiveRide(updated)
+        } catch (e) {
+          setRiderMessage(e.message || 'Could not update ride location for drivers.')
+        }
       }
     })
 
@@ -1817,65 +2039,6 @@ function App() {
     }
   }
 
-  const handleHomeEstimateSubmit = useCallback(
-    (event) => {
-      event.preventDefault()
-      const pickupAddress = homeEstimateForm.pickupAddress.trim()
-      const dropoffAddress = homeEstimateForm.dropoffAddress.trim()
-
-      if (!pickupAddress || !dropoffAddress) {
-        setHomeEstimateError('Please add pickup and dropoff locations.')
-        return
-      }
-
-      const whenLabel = homeEstimateForm.scheduleAt
-        ? `Scheduled: ${new Date(homeEstimateForm.scheduleAt).toLocaleString()}`
-        : 'Pickup now'
-
-      setRiderForm((prev) => ({
-        ...prev,
-        pickupAddress,
-        dropoffAddress,
-        when: whenLabel,
-      }))
-      setHomeEstimateError('')
-      navigateToPage('rider')
-    },
-    [homeEstimateForm, navigateToPage],
-  )
-
-  const handleHomeLocationInput = useCallback((field, value) => {
-    if (field === 'pickup') {
-      setHomeEstimateForm((prev) => ({ ...prev, pickupAddress: value }))
-      setShowHomePickupSuggestions(true)
-      if (!value.trim()) {
-        setHomePickupSuggestions([])
-        homePickupCoordsRef.current = null
-      }
-      return
-    }
-
-    setHomeEstimateForm((prev) => ({ ...prev, dropoffAddress: value }))
-    setShowHomeDropoffSuggestions(true)
-    if (!value.trim()) setHomeDropoffSuggestions([])
-  }, [])
-
-  const handleSelectHomeLocation = useCallback((field, suggestion) => {
-    if (field === 'pickup') {
-      if (suggestion?.coords) {
-        homePickupCoordsRef.current = suggestion.coords
-      }
-      setHomeEstimateForm((prev) => ({ ...prev, pickupAddress: suggestion.placeName }))
-      setHomePickupSuggestions([])
-      setShowHomePickupSuggestions(false)
-      return
-    }
-
-    setHomeEstimateForm((prev) => ({ ...prev, dropoffAddress: suggestion.placeName }))
-    setHomeDropoffSuggestions([])
-    setShowHomeDropoffSuggestions(false)
-  }, [])
-
   const requestPreferredDriver = useCallback(
     async (preferredDriverId) => {
       if (!authToken) throw new Error('Sign in required')
@@ -1884,24 +2047,35 @@ function App() {
         throw new Error('Please add pickup and dropoff locations.')
       }
 
+      // Use the exact trip coordinates shown on the map (markers / route),
+      // not a fresh search from the text inputs.
       let nextPickup = riderCoords.pickup
       let nextDropoff = riderCoords.dropoff
-      const [pickupMatch, dropoffMatch] = await Promise.all([
-        resolveLocationFromQuery(riderForm.pickupAddress),
-        resolveLocationFromQuery(riderForm.dropoffAddress),
-      ])
-      if (pickupMatch?.coords) nextPickup = pickupMatch.coords
-      if (dropoffMatch?.coords) nextDropoff = dropoffMatch.coords
       ;[nextPickup, nextDropoff] = await Promise.all([
         snapToRoad(nextPickup),
         snapToRoad(nextDropoff),
       ])
+      const [resolvedPickupAddress, resolvedDropoffAddress] = await Promise.all([
+        reverseGeocode(nextPickup),
+        reverseGeocode(nextDropoff),
+      ])
+      const finalPickupAddress =
+        (typeof resolvedPickupAddress === 'string' && resolvedPickupAddress.trim()) ||
+        riderForm.pickupAddress.trim()
+      const finalDropoffAddress =
+        (typeof resolvedDropoffAddress === 'string' && resolvedDropoffAddress.trim()) ||
+        riderForm.dropoffAddress.trim()
 
       setRiderCoords({ pickup: nextPickup, dropoff: nextDropoff })
+      setRiderForm((prev) => ({
+        ...prev,
+        pickupAddress: finalPickupAddress,
+        dropoffAddress: finalDropoffAddress,
+      }))
       const fareEstimate = routeOptions[selectedRouteIndex]?.priceUsd
       return createRide(authToken, {
-        pickupAddress: riderForm.pickupAddress.trim(),
-        dropoffAddress: riderForm.dropoffAddress.trim(),
+        pickupAddress: finalPickupAddress,
+        dropoffAddress: finalDropoffAddress,
         pickupLat: nextPickup.lat,
         pickupLng: nextPickup.lng,
         dropoffLat: nextDropoff.lat,
@@ -1918,10 +2092,10 @@ function App() {
       riderForm.dropoffAddress,
       riderCoords.pickup,
       riderCoords.dropoff,
-      resolveLocationFromQuery,
       routeOptions,
       selectedRouteIndex,
       snapToRoad,
+      reverseGeocode,
     ],
   )
 
@@ -1951,52 +2125,88 @@ function App() {
               JO Transportation
             </span>
           </div>
-          <nav className="hidden items-center gap-8 text-sm font-medium md:flex">
-            {authUser?.role === 'ADMIN' && (
+          <nav className="hidden items-center gap-3 text-sm font-medium md:flex">
+            <button
+              type="button"
+              onClick={() => navigateToPage('home')}
+              className={`rounded-full px-3 py-1.5 transition ${
+                activePage === 'home'
+                  ? 'bg-[#9d3733] text-[#f2e3bb]'
+                  : 'hover:bg-[#9d3733]/10 hover:text-[#9d3733]'
+              }`}
+            >
+              Home
+            </button>
+            {authUser?.role !== 'ADMIN' && (
               <button
                 type="button"
-                onClick={() => navigateToPage('admin')}
-                className="transition hover:text-[#9d3733]"
+                onClick={() => navigateToPage('rider')}
+                className={`rounded-full px-3 py-1.5 transition ${
+                  activePage === 'rider'
+                    ? 'bg-[#9d3733] text-[#f2e3bb]'
+                    : 'hover:bg-[#9d3733]/10 hover:text-[#9d3733]'
+                }`}
               >
-                Admin
+                Ride
               </button>
             )}
             {authUser?.role === 'DRIVER' && (
               <button
                 type="button"
                 onClick={() => navigateToPage('driver')}
-                className="transition hover:text-[#9d3733]"
+                className={`rounded-full px-3 py-1.5 transition ${
+                  activePage === 'driver'
+                    ? 'bg-[#9d3733] text-[#f2e3bb]'
+                    : 'hover:bg-[#9d3733]/10 hover:text-[#9d3733]'
+                }`}
               >
                 Drive
               </button>
             )}
-            {authUser?.role !== 'ADMIN' && (
+            {authUser?.role === 'ADMIN' && (
               <button
                 type="button"
-                onClick={() => navigateToPage('rider')}
-                className="transition hover:text-[#9d3733]"
+                onClick={() => navigateToPage('admin')}
+                className={`rounded-full px-3 py-1.5 transition ${
+                  activePage === 'admin'
+                    ? 'bg-[#9d3733] text-[#f2e3bb]'
+                    : 'hover:bg-[#9d3733]/10 hover:text-[#9d3733]'
+                }`}
               >
-                Ride
+                Admin
               </button>
             )}
-            <a href="#" className="transition hover:text-[#9d3733]">
-              Reserve
-            </a>
-            <a href="#" className="transition hover:text-[#9d3733]">
-              Business
-            </a>
             <button
               type="button"
               onClick={() => navigateToPage('about')}
-              className="transition hover:text-[#9d3733]"
+              className={`rounded-full px-3 py-1.5 transition ${
+                activePage === 'about'
+                  ? 'bg-[#9d3733] text-[#f2e3bb]'
+                  : 'hover:bg-[#9d3733]/10 hover:text-[#9d3733]'
+              }`}
             >
               About
             </button>
-            <a href="#" className="transition hover:text-[#9d3733]">
-              Help
-            </a>
           </nav>
           <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
+            <button
+              type="button"
+              onClick={() => setMobileNavOpen((prev) => !prev)}
+              aria-label={mobileNavOpen ? 'Close navigation menu' : 'Open navigation menu'}
+              className={`flex h-9 w-9 items-center justify-center rounded-lg border transition md:hidden ${
+                darkMode
+                  ? 'border-[#9d3733]/50 bg-[#111] text-[#f2e3bb]'
+                  : 'border-[#9d3733]/40 bg-[#fff8eb] text-[#9d3733]'
+              }`}
+            >
+              <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2">
+                {mobileNavOpen ? (
+                  <path d="m6 6 12 12M18 6 6 18" strokeLinecap="round" />
+                ) : (
+                  <path d="M4 7h16M4 12h16M4 17h16" strokeLinecap="round" />
+                )}
+              </svg>
+            </button>
             <button
               type="button"
               onClick={() => setDarkMode((prev) => !prev)}
@@ -2100,16 +2310,6 @@ function App() {
                     <button
                       type="button"
                       onClick={() => {
-                        navigateToPage('profile')
-                        setUserMenuOpen(false)
-                      }}
-                      className="mt-1 w-full rounded-lg px-3 py-2 text-left text-sm transition hover:bg-[#9d3733]/15"
-                    >
-                      Profile
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
                         const dest =
                           authUser?.role === 'ADMIN'
                             ? 'admin'
@@ -2119,7 +2319,7 @@ function App() {
                         navigateToPage(dest)
                         setUserMenuOpen(false)
                       }}
-                      className="w-full rounded-lg px-3 py-2 text-left text-sm transition hover:bg-[#9d3733]/15"
+                      className="mt-1 w-full rounded-lg px-3 py-2 text-left text-sm transition hover:bg-[#9d3733]/15"
                     >
                       {authUser?.role === 'ADMIN'
                         ? 'Admin dashboard'
@@ -2127,13 +2327,6 @@ function App() {
                           ? 'Driver dashboard'
                           : 'My rides'}
                     </button>
-                    <button
-                      type="button"
-                      className="w-full rounded-lg px-3 py-2 text-left text-sm transition hover:bg-[#9d3733]/15"
-                    >
-                      Settings
-                    </button>
-
                     <button
                       type="button"
                       onClick={handleLogout}
@@ -2162,6 +2355,69 @@ function App() {
             )}
           </div>
         </div>
+        {mobileNavOpen && (
+          <div
+            className={`mx-auto mb-3 w-[calc(100%-1.5rem)] max-w-6xl rounded-2xl border p-2 shadow-lg md:hidden ${
+              darkMode
+                ? 'border-[#9d3733]/45 bg-[#0f0f0f] text-[#f2e3bb]'
+                : 'border-[#9d3733]/35 bg-[#fff8eb] text-[#2d100f]'
+            }`}
+          >
+            <div className="grid grid-cols-2 gap-2 text-sm">
+              <button
+                type="button"
+                onClick={() => navigateToPage('home')}
+                className={`rounded-xl px-3 py-2 text-left font-semibold ${
+                  activePage === 'home' ? 'bg-[#9d3733] text-[#f2e3bb]' : 'hover:bg-[#9d3733]/10'
+                }`}
+              >
+                Home
+              </button>
+              {authUser?.role !== 'ADMIN' && (
+                <button
+                  type="button"
+                  onClick={() => navigateToPage('rider')}
+                  className={`rounded-xl px-3 py-2 text-left font-semibold ${
+                    activePage === 'rider' ? 'bg-[#9d3733] text-[#f2e3bb]' : 'hover:bg-[#9d3733]/10'
+                  }`}
+                >
+                  Ride
+                </button>
+              )}
+              {authUser?.role === 'ADMIN' && (
+                <button
+                  type="button"
+                  onClick={() => navigateToPage('admin')}
+                  className={`rounded-xl px-3 py-2 text-left font-semibold ${
+                    activePage === 'admin' ? 'bg-[#9d3733] text-[#f2e3bb]' : 'hover:bg-[#9d3733]/10'
+                  }`}
+                >
+                  Admin
+                </button>
+              )}
+              {authUser?.role === 'DRIVER' && (
+                <button
+                  type="button"
+                  onClick={() => navigateToPage('driver')}
+                  className={`rounded-xl px-3 py-2 text-left font-semibold ${
+                    activePage === 'driver' ? 'bg-[#9d3733] text-[#f2e3bb]' : 'hover:bg-[#9d3733]/10'
+                  }`}
+                >
+                  Drive
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => navigateToPage('about')}
+                className={`rounded-xl px-3 py-2 text-left font-semibold ${
+                  activePage === 'about' ? 'bg-[#9d3733] text-[#f2e3bb]' : 'hover:bg-[#9d3733]/10'
+                }`}
+              >
+                About
+              </button>
+            </div>
+          </div>
+        )}
       </header>
 
       {activePage === 'profile' ? (
@@ -2280,6 +2536,7 @@ function App() {
           activeRide={activeRide}
           rideHistory={rideHistory}
           fetchRideDashboard={fetchRiderData}
+          setActiveRide={setActiveRide}
           navigateToPage={navigateToPage}
           setAuthUser={setAuthUser}
         />
@@ -2327,342 +2584,522 @@ function App() {
         <AboutPage darkMode={darkMode} navigateToPage={navigateToPage} />
       ) : (
         <>
-      <section className="mx-auto grid w-full max-w-6xl gap-10 px-6 pb-12 pt-28 md:grid-cols-2 md:pb-16 md:pt-32">
-        <div>
-          <p className="mb-4 inline-block rounded-full border border-[#9d3733] px-3 py-1 text-xs font-semibold uppercase tracking-[0.25em] text-[#9d3733]">
-            Premium Local Rides
-          </p>
-          <h1
-            className={`font-brand mb-6 text-4xl font-bold leading-tight sm:text-5xl ${
-              darkMode ? 'text-white' : 'text-[#2d100f]'
-            }`}
-          >
-            Go anywhere with
-            <span className="text-[#9d3733]"> JO Transportation</span>
-          </h1>
-          <p
-            className={`mb-8 max-w-xl text-base sm:text-lg ${
-              darkMode ? 'text-[#f2e3bb]/90' : 'text-[#4b2220]'
-            }`}
-          >
-            Request fast pickups, schedule airport rides, and track your trip in
-            real time. Reliable drivers, transparent pricing, and comfort-first
-            rides every day.
-          </p>
-          <div className="flex flex-wrap gap-3">
-            <button
-              type="button"
-              onClick={() => navigateToPage('rider')}
-              className="font-accent rounded-lg bg-[#9d3733] px-6 py-3 text-sm font-bold text-[#f2e3bb] transition hover:bg-[#842f2b]"
-            >
-              Book a ride
-            </button>
-            <button
-              className={`font-accent rounded-lg border px-6 py-3 text-sm font-bold transition ${
-                darkMode
-                  ? 'border-[#f2e3bb]/40 text-[#f2e3bb] hover:border-white hover:text-white'
-                  : 'border-[#9d3733]/50 text-[#842f2b] hover:border-[#9d3733] hover:text-[#9d3733]'
-              }`}
-            >
-              Become a driver
-            </button>
-          </div>
-          {authBusy && !authModalOpen && (
-            <p className="mt-4 text-sm text-[#9d3733]">Signing in…</p>
-          )}
-          {authError && !authModalOpen && (
-            <p className="mt-4 text-sm text-[#9d3733]">{authError}</p>
-          )}
-        </div>
-
-        <div
-          className={`rounded-2xl border p-6 shadow-xl transition-colors duration-300 ${
-            darkMode
-              ? 'border-[#9d3733]/50 bg-[#111] shadow-[#9d3733]/20'
-              : 'border-[#9d3733]/35 bg-[#fff8eb] shadow-[#9d3733]/15'
-          }`}
+      <div className="text-[#2d100f]">
+        <section
+          className="overflow-x-hidden pb-10 pt-24 sm:pt-28"
+          style={{ backgroundColor: WELCOME_CREAM }}
         >
-          <h2
-            className={`font-accent mb-5 text-xl font-bold ${
-              darkMode ? 'text-white' : 'text-[#2d100f]'
-            }`}
-          >
-            Get a price estimate
-          </h2>
-          <form className="space-y-3" onSubmit={handleHomeEstimateSubmit}>
-            <div className="relative">
-              <input
-                type="text"
-                placeholder="Pickup location"
-                value={homeEstimateForm.pickupAddress}
-                onChange={(e) => {
-                  handleHomeLocationInput('pickup', e.target.value)
-                  if (homeEstimateError) setHomeEstimateError('')
-                }}
-                onFocus={() => setShowHomePickupSuggestions(true)}
-                onBlur={() => {
-                  window.setTimeout(() => setShowHomePickupSuggestions(false), 120)
-                }}
-                className={`w-full rounded-lg border px-4 py-3 text-sm outline-none transition ${
-                  darkMode
-                    ? 'border-[#9d3733]/60 bg-black text-[#f2e3bb] placeholder:text-[#f2e3bb]/50 focus:border-[#9d3733]'
-                    : 'border-[#9d3733]/40 bg-white text-[#2d100f] placeholder:text-[#9d3733]/60 focus:border-[#9d3733]'
-                }`}
-              />
-              {showHomePickupSuggestions && (
-                <div
-                  className={`absolute z-20 mt-1 max-h-60 w-full overflow-auto rounded-xl border text-xs shadow-lg sm:max-h-72 ${
-                    darkMode
-                      ? 'border-[#9d3733]/40 bg-[#121212] text-[#f2e3bb]'
-                      : 'border-[#9d3733]/25 bg-white text-[#2d100f]'
-                  }`}
-                >
-                  {homePickupSearchBusy ? (
-                    <p className="px-3 py-2 text-[#9d3733]">Searching pickup...</p>
-                  ) : homePickupSuggestions.length > 0 ? (
-                    homePickupSuggestions.map((suggestion) => (
-                      <button
-                        key={suggestion.id}
-                        type="button"
-                        onMouseDown={(event) => event.preventDefault()}
-                        onClick={() => handleSelectHomeLocation('pickup', suggestion)}
-                        className={`block w-full border-b px-3 py-2 text-left transition last:border-b-0 ${
-                          darkMode
-                            ? 'border-[#9d3733]/20 hover:bg-[#9d3733]/20'
-                            : 'border-[#9d3733]/15 hover:bg-[#9d3733]/10'
-                        }`}
-                      >
-                        {suggestion.badge ? (
-                          <span className="mb-0.5 block text-[10px] font-bold uppercase tracking-wide text-[#15803d]">
-                            {suggestion.badge}
-                          </span>
-                        ) : null}
-                        <span className="text-[13px] leading-snug sm:text-sm">{suggestion.placeName}</span>
-                      </button>
-                    ))
-                  ) : (
-                    <p className="px-3 py-2 opacity-70">
-                      Allow location for nearby places, or type 3+ letters to search anywhere.
-                    </p>
-                  )}
-                </div>
-              )}
-            </div>
-            <div className="relative">
-              <input
-                type="text"
-                placeholder="Dropoff location"
-                value={homeEstimateForm.dropoffAddress}
-                onChange={(e) => {
-                  handleHomeLocationInput('dropoff', e.target.value)
-                  if (homeEstimateError) setHomeEstimateError('')
-                }}
-                onFocus={() => setShowHomeDropoffSuggestions(true)}
-                onBlur={() => {
-                  window.setTimeout(() => setShowHomeDropoffSuggestions(false), 120)
-                }}
-                className={`w-full rounded-lg border px-4 py-3 text-sm outline-none transition ${
-                  darkMode
-                    ? 'border-[#9d3733]/60 bg-black text-[#f2e3bb] placeholder:text-[#f2e3bb]/50 focus:border-[#9d3733]'
-                    : 'border-[#9d3733]/40 bg-white text-[#2d100f] placeholder:text-[#9d3733]/60 focus:border-[#9d3733]'
-                }`}
-              />
-              {showHomeDropoffSuggestions && (
-                <div
-                  className={`absolute z-20 mt-1 max-h-60 w-full overflow-auto rounded-xl border text-xs shadow-lg sm:max-h-72 ${
-                    darkMode
-                      ? 'border-[#9d3733]/40 bg-[#121212] text-[#f2e3bb]'
-                      : 'border-[#9d3733]/25 bg-white text-[#2d100f]'
-                  }`}
-                >
-                  {homeDropoffSearchBusy ? (
-                    <p className="px-3 py-2 text-[#9d3733]">Searching dropoff...</p>
-                  ) : homeDropoffSuggestions.length > 0 ? (
-                    homeDropoffSuggestions.map((suggestion) => (
-                      <button
-                        key={suggestion.id}
-                        type="button"
-                        onMouseDown={(event) => event.preventDefault()}
-                        onClick={() => handleSelectHomeLocation('dropoff', suggestion)}
-                        className={`block w-full border-b px-3 py-2 text-left transition last:border-b-0 ${
-                          darkMode
-                            ? 'border-[#9d3733]/20 hover:bg-[#9d3733]/20'
-                            : 'border-[#9d3733]/15 hover:bg-[#9d3733]/10'
-                        }`}
-                      >
-                        {suggestion.badge ? (
-                          <span className="mb-0.5 block text-[10px] font-bold uppercase tracking-wide text-[#15803d]">
-                            {suggestion.badge}
-                          </span>
-                        ) : null}
-                        <span className="text-[13px] leading-snug sm:text-sm">{suggestion.placeName}</span>
-                      </button>
-                    ))
-                  ) : (
-                    <p className="px-3 py-2 opacity-70">
-                      Set pickup first or allow location — then nearby destinations appear, or type 3+
-                      letters.
-                    </p>
-                  )}
-                </div>
-              )}
-            </div>
-            <input
-              type="datetime-local"
-              value={homeEstimateForm.scheduleAt}
-              onChange={(e) => {
-                setHomeEstimateForm((prev) => ({ ...prev, scheduleAt: e.target.value }))
-              }}
-              className={`w-full rounded-lg border px-4 py-3 text-sm outline-none transition ${
-                darkMode
-                  ? 'border-[#9d3733]/60 bg-black text-[#f2e3bb] focus:border-[#9d3733]'
-                  : 'border-[#9d3733]/40 bg-white text-[#2d100f] focus:border-[#9d3733]'
-              }`}
-            />
-            <button
-              type="submit"
-              className="font-accent w-full rounded-lg bg-[#9d3733] px-4 py-3 text-sm font-bold text-[#f2e3bb] transition hover:bg-[#842f2b]"
+            <div
+              id="home-hero"
+              className="relative scroll-mt-28 w-full overflow-hidden"
+              style={{ backgroundColor: WELCOME_CREAM }}
             >
-              Check fare
-            </button>
-            {homeEstimateError && <p className="text-sm text-[#9d3733]">{homeEstimateError}</p>}
-          </form>
-        </div>
-      </section>
-
-      <section className="mx-auto w-full max-w-6xl px-6 pb-14">
-        <div className="grid gap-5 md:grid-cols-3">
-          {[
-            {
-              title: 'Fast pickup',
-              heading: 'Car arrives in minutes',
-              body: 'Smart dispatch routes the nearest trusted driver to your pickup point.',
-            },
-            {
-              title: 'Safe travel',
-              heading: 'Verified drivers',
-              body: 'Driver profiles, trip sharing, and support keep every journey secure and easy.',
-            },
-            {
-              title: 'Fair pricing',
-              heading: 'Know the fare before ride',
-              body: 'Upfront estimates with clear charges so you always stay in control.',
-            },
-          ].map((item) => (
-            <article
-              key={item.title}
-              className={`rounded-2xl border p-5 transition-colors duration-300 ${
-                darkMode
-                  ? 'border-[#9d3733]/50 bg-[#121212]'
-                  : 'border-[#9d3733]/35 bg-[#fff8eb]'
-              }`}
-            >
-              <p className="mb-3 text-sm font-semibold uppercase tracking-wide text-[#9d3733]">
-                {item.title}
-              </p>
-              <h3
-                className={`font-accent mb-2 text-lg font-bold ${
-                  darkMode ? 'text-white' : 'text-[#2d100f]'
-                }`}
-              >
-                {item.heading}
-              </h3>
-              <p
-                className={`text-sm ${
-                  darkMode ? 'text-[#f2e3bb]/85' : 'text-[#4b2220]'
-                }`}
-              >
-                {item.body}
-              </p>
-            </article>
-          ))}
-        </div>
-      </section>
-
-      <section className="mx-auto w-full max-w-6xl px-6 pb-14">
-        <div
-          className={`rounded-2xl border p-6 transition-colors duration-300 sm:p-8 ${
-            darkMode
-              ? 'border-[#9d3733]/40 bg-[#0f0f0f]'
-              : 'border-[#9d3733]/30 bg-[#fff8eb]'
-          }`}
-        >
-          <h2
-            className={`font-brand mb-8 text-3xl font-bold ${
-              darkMode ? 'text-white' : 'text-[#2d100f]'
-            }`}
-          >
-            Book your trip on your phone or computer
-          </h2>
-
-          <div className="space-y-8">
-            {bookingSteps.map((step, index) => (
-              <article key={step.title} className="grid gap-5 md:grid-cols-[300px_1fr]">
-                <div
-                  className={`relative overflow-hidden rounded-xl border ${
-                    darkMode
-                      ? 'border-[#9d3733]/40 bg-[#161616]'
-                      : 'border-[#9d3733]/30 bg-[#f7ecd0]'
-                  }`}
-                >
+              <div className="relative z-[1] mx-auto w-full max-w-[1120px] px-4 sm:px-6 lg:px-8 xl:max-w-[1180px]">
+                <div className="grid grid-cols-1 gap-10 py-8 sm:py-10 lg:grid-cols-2 lg:items-center lg:gap-8 lg:py-10 xl:gap-10 lg:min-h-[min(88vh,820px)]">
+                <div className="flex justify-center lg:justify-end lg:pr-1 xl:pr-3">
                   <div
-                    className={`absolute inset-0 ${
-                      darkMode
-                        ? 'bg-gradient-to-br from-[#9d3733]/35 via-transparent to-black'
-                        : 'bg-gradient-to-br from-[#9d3733]/20 via-transparent to-white'
-                    }`}
-                  />
-                  <div className="relative flex h-48 items-center justify-center">
-                    <img
-                      src={step.image}
-                      alt={step.title}
-                      className="h-full w-full object-cover"
-                    />
-                  </div>
-                </div>
+                    className="w-full max-w-[28rem] rounded-[1.25rem] px-7 py-8 shadow-[0_4px_32px_-14px_rgba(45,16,16,0.14)] sm:rounded-3xl sm:px-8 sm:py-10"
+                    style={{ backgroundColor: WELCOME_CONTENT_PANEL_BG }}
+                  >
+                  <h1 className="font-brand text-[2rem] font-bold leading-[1.1] tracking-tight text-[#3d1212] sm:text-[2.75rem] sm:leading-[1.08]">
+                    <span className="text-[#4a1515]">Ride in Comfort.</span>
+                    <br />
+                    <span className="text-[#96724a]">Arrive in Style.</span>
+                  </h1>
+                  <p className="mt-6 max-w-md text-[0.98rem] font-medium leading-[1.65] text-[#3d2a28] sm:text-[1.0625rem]">
+                    We use premium vehicles to ensure your journey is comfortable, safe, and always on
+                    time.
+                  </p>
 
-                <div className="grid grid-cols-[24px_1fr] gap-4">
-                  <div className="flex justify-center">
-                    <div className="flex w-6 flex-col items-center">
-                      <span className="mt-1 h-2.5 w-2.5 rounded-sm bg-[#9d3733]" />
-                      {index !== bookingSteps.length - 1 && (
-                        <span
-                          className={`mt-2 h-full w-px ${
-                            darkMode ? 'bg-[#f2e3bb]/35' : 'bg-[#9d3733]/35'
-                          }`}
-                        />
-                      )}
+                  <div className="mt-7 rounded-2xl bg-white p-5 shadow-[0_2px_20px_-6px_rgba(45,16,16,0.08)] sm:p-6">
+                    <div className="flex items-center gap-4">
+                      <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-[#4a1515] text-white shadow-sm">
+                        <svg className="h-6 w-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+                          <path d="M12 3 4 7v6c0 5 3.5 9 8 10 4.5-1 8-5 8-10V7l-8-4Z" strokeLinejoin="round" />
+                          <path d="m9 12 2 2 4-4" strokeLinecap="round" strokeLinejoin="round" />
+                        </svg>
+                      </div>
+                      <div className="min-w-0">
+                        <p className="text-[0.95rem] font-semibold leading-snug text-[#4a1515]">Chevrolet Suburban</p>
+                        <p className="mt-0.5 text-sm font-medium text-[#96724a]">High Country</p>
+                        <p className="mt-1 text-xs font-medium text-[#5a4540]">Full-size luxury SUV</p>
+                      </div>
                     </div>
                   </div>
 
-                  <div className="pb-2">
-                    <h3
-                      className={`font-accent text-xl font-bold ${
-                        darkMode ? 'text-white' : 'text-[#2d100f]'
-                      }`}
+                  {authUser?.role !== 'ADMIN' && (
+                    <button
+                      type="button"
+                      onClick={() => navigateToPage('rider')}
+                      className="mt-8 inline-flex w-full items-center justify-center gap-2 rounded-xl bg-[#4a1515] px-6 py-3.5 text-sm font-bold tracking-wide text-white shadow-[0_4px_24px_-10px_rgba(74,21,21,0.45)] transition hover:bg-[#3d1212] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#4a1515] focus-visible:ring-offset-2 sm:mt-9 sm:py-4"
                     >
-                      {index + 1}. {step.title}
-                    </h3>
-                    <p
-                      className={`mt-2 max-w-2xl text-base ${
-                        darkMode ? 'text-[#f2e3bb]/85' : 'text-[#4b2220]'
-                      }`}
-                    >
-                      {step.description}
-                    </p>
-                    <button className="font-accent mt-4 border-b border-[#9d3733] text-sm font-bold text-[#9d3733] transition hover:border-[#842f2b] hover:text-[#842f2b]">
-                      {step.cta}
+                      Book rider
+                      <span aria-hidden>→</span>
                     </button>
+                  )}
+
+                  {authBusy && !authModalOpen && (
+                    <p className="mt-6 text-sm text-[#9d3733]">Signing in…</p>
+                  )}
+                  {authError && !authModalOpen && (
+                    <p className="mt-6 text-sm text-[#9d3733]">{authError}</p>
+                  )}
                   </div>
                 </div>
-              </article>
-            ))}
+
+                <div
+                  className="relative flex min-h-[260px] w-full min-w-0 items-center justify-center lg:min-h-0 lg:justify-start lg:pl-1 xl:pl-3"
+                  style={{ backgroundColor: WELCOME_CREAM }}
+                >
+                  <div
+                    className="relative isolate h-[min(44vh,330px)] w-full min-h-[240px] max-w-[min(100%,26rem)] overflow-hidden rounded-3xl shadow-[0_12px_44px_-18px_rgba(45,16,16,0.16)] sm:max-w-[28rem] sm:rounded-[1.35rem] lg:h-[min(58vh,508px)] lg:max-w-[min(100%,36rem)] lg:min-h-[300px] xl:max-w-[38rem]"
+                    role="region"
+                    aria-roledescription="carousel"
+                    aria-label="Service highlights"
+                    onTouchStart={(e) => {
+                      welcomeTouchStartXRef.current = e.targetTouches[0].clientX
+                    }}
+                    onTouchEnd={(e) => {
+                      const start = welcomeTouchStartXRef.current
+                      welcomeTouchStartXRef.current = null
+                      if (start == null || WELCOME_HERO_SLIDES.length < 2) return
+                      const dx = e.changedTouches[0].clientX - start
+                      if (dx > 56) {
+                        setWelcomeSlideIndex(
+                          (i) =>
+                            (i - 1 + WELCOME_HERO_SLIDES.length) % WELCOME_HERO_SLIDES.length,
+                        )
+                      } else if (dx < -56) {
+                        setWelcomeSlideIndex((i) => (i + 1) % WELCOME_HERO_SLIDES.length)
+                      }
+                    }}
+                  >
+                    <div className="relative h-full w-full min-h-[inherit] overflow-hidden rounded-[inherit]">
+                      <div
+                        className="flex h-full w-full will-change-transform transition-transform duration-500 ease-out motion-reduce:transition-none [transition-timing-function:cubic-bezier(0.33,1,0.68,1)]"
+                        style={{
+                          transform: `translate3d(-${welcomeSlideIndex * 100}%,0,0)`,
+                        }}
+                      >
+                        {WELCOME_HERO_SLIDES.map((slide, i) => (
+                          <div
+                            key={slide.src}
+                            className="relative h-full w-full min-w-[100%] max-w-[100%] shrink-0 grow-0 overflow-hidden rounded-[inherit]"
+                          >
+                            <img
+                              src={slide.src}
+                              alt={slide.alt}
+                              draggable={false}
+                              className="absolute inset-0 z-0 h-full w-full object-cover"
+                              style={{ objectPosition: slide.objectPosition }}
+                            />
+                            <div
+                              className="pointer-events-none absolute inset-0 z-[1] bg-gradient-to-b from-black/65 via-black/28 to-black/78"
+                              aria-hidden
+                            />
+                            <div
+                              key={
+                                welcomeSlideIndex === i
+                                  ? `hero-cap-${welcomeSlideIndex}`
+                                  : `hero-cap-idle-${i}`
+                              }
+                              className="relative z-10 flex h-full min-h-[240px] w-full flex-col items-center justify-center px-5 py-9 text-center sm:min-h-[280px] sm:px-9 sm:py-11"
+                            >
+                              <p className="font-accent text-[11px] font-bold uppercase tracking-[0.28em] text-[#e8d5c4] sm:text-xs">
+                                {slide.kicker}
+                              </p>
+                              <div
+                                className="mx-auto mt-3 h-0.5 max-w-[10rem] bg-gradient-to-r from-transparent via-[#f5ebe0] to-transparent"
+                                aria-hidden
+                              />
+                              <h3 className="font-brand mt-4 max-w-xl text-lg font-bold leading-snug text-white sm:text-2xl sm:leading-snug [text-shadow:0_2px_28px_rgba(0,0,0,0.9)]">
+                                {slide.title}
+                              </h3>
+                              <p className="mt-4 max-w-md text-sm font-medium leading-relaxed text-[#f5f0ea] sm:text-[1.02rem] [text-shadow:0_1px_16px_rgba(0,0,0,0.95)]">
+                                {slide.body}
+                              </p>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                    {WELCOME_HERO_SLIDES.length > 1 ? (
+                      <div
+                        className="absolute bottom-3 left-0 right-0 z-40 flex justify-center gap-2"
+                        role="tablist"
+                        aria-label="Hero slides"
+                      >
+                        {WELCOME_HERO_SLIDES.map((slide, i) => (
+                          <button
+                            key={slide.src}
+                            type="button"
+                            role="tab"
+                            aria-selected={i === welcomeSlideIndex}
+                            aria-label={`Show slide ${i + 1}`}
+                            className={`h-2 rounded-full transition focus:outline-none focus-visible:ring-2 focus-visible:ring-[#f5ebe0] focus-visible:ring-offset-2 focus-visible:ring-offset-[#1a1412] ${
+                              i === welcomeSlideIndex
+                                ? 'w-8 bg-[#f5ebe0] shadow-[0_0_0_1px_rgba(245,235,224,0.35)]'
+                                : 'w-2 bg-white/35 hover:bg-white/55'
+                            }`}
+                            onClick={() => setWelcomeSlideIndex(i)}
+                          />
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+                </div>
+              </div>
+            </div>
+
+            <div
+              className="mx-auto w-full max-w-[1180px] px-4 pb-6 pt-2 sm:px-6 sm:pb-8 lg:px-8"
+              style={{ backgroundColor: WELCOME_CREAM }}
+            >
+              <div
+                id="home-fleet"
+                className="scroll-mt-28 rounded-3xl border border-[#e8dfd6] bg-white p-6 shadow-[0_4px_40px_-14px_rgba(45,16,16,0.1)] sm:p-8"
+              >
+                <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between sm:gap-6">
+                  <div>
+                    <p className="font-accent text-[11px] font-bold uppercase tracking-[0.22em] text-[#96724a]">
+                      Vehicle highlights
+                    </p>
+                    <h2 className="font-brand mt-2 text-xl font-bold leading-tight text-[#3d1212] sm:text-2xl">
+                      Everything included with your Suburban
+                    </h2>
+                  </div>
+                </div>
+                <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4 sm:gap-4">
+                  {[
+                    {
+                      label: 'Up to 7 Passengers',
+                      icon: (
+                        <path
+                          d="M16 11a3 3 0 1 0-6 0M8 11a3 3 0 1 0-6 0M4 20v-1a3 3 0 0 1 3-3h1m10 4v-1a3 3 0 0 0-3-3h-1"
+                          strokeLinecap="round"
+                        />
+                      ),
+                    },
+                    {
+                      label: 'Large Luggage Capacity',
+                      icon: (
+                        <>
+                          <path d="M6 8h12v10a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V8Z" />
+                          <path d="M9 8V6a3 3 0 0 1 6 0v2" strokeLinecap="round" />
+                        </>
+                      ),
+                    },
+                    {
+                      label: 'Leather Seats & Climate Control',
+                      icon: (
+                        <>
+                          <path d="M4 14h16v4H4z" />
+                          <path d="M6 14V9a3 3 0 0 1 3-3h6a3 3 0 0 1 3 3v5" />
+                        </>
+                      ),
+                    },
+                    {
+                      label: 'Wi-Fi, Charging Ports, and More',
+                      icon: (
+                        <>
+                          <path d="M5 12.55a11 11 0 0 1 14.08 0" strokeLinecap="round" />
+                          <path d="M8.53 16.09a7 7 0 0 1 6.94 0" strokeLinecap="round" />
+                          <path d="M12 20h.01" strokeLinecap="round" />
+                        </>
+                      ),
+                    },
+                  ].map((item) => (
+                    <div
+                      key={item.label}
+                      className="flex flex-col items-center gap-3 rounded-2xl bg-[#FFFCF9] px-3 py-4 text-center ring-1 ring-[#e8dfd6]/80 sm:px-4 sm:py-5"
+                    >
+                      <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-white shadow-[0_2px_12px_-4px_rgba(45,16,16,0.12)]">
+                        <svg
+                          className="h-5 w-5 text-[#4a1515]"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="1.75"
+                          aria-hidden
+                        >
+                          {item.icon}
+                        </svg>
+                      </div>
+                      <p className="text-[11px] font-semibold leading-snug text-[#4b2220] sm:text-xs">
+                        {item.label}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+                {authUser?.role !== 'ADMIN' && (
+                  <div className="mt-6 flex flex-col gap-3 border-t border-[#e8dfd6] pt-6 sm:flex-row sm:flex-wrap sm:justify-end">
+                    <button
+                      type="button"
+                      onClick={() => navigateToPage('rider')}
+                      className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-[#4a1515] px-6 py-3.5 text-sm font-bold text-white shadow-[0_4px_20px_-8px_rgba(74,21,21,0.4)] transition hover:bg-[#3d1212] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#4a1515] focus-visible:ring-offset-2 sm:order-2 sm:w-auto sm:min-w-[200px]"
+                    >
+                      Book this vehicle
+                      <span aria-hidden>→</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => navigateToPage('rider')}
+                      className="inline-flex w-full items-center justify-center gap-2 rounded-xl border-2 border-[#4a1515] bg-transparent px-6 py-3.5 text-sm font-bold text-[#4a1515] transition hover:bg-[#4a1515]/5 focus:outline-none focus-visible:ring-2 focus-visible:ring-[#4a1515] focus-visible:ring-offset-2 sm:order-1 sm:w-auto sm:min-w-[200px]"
+                    >
+                      Book rider
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+        </section>
+
+        <section
+          id="home-services"
+          className="scroll-mt-28 pb-14 pt-4 sm:pt-6"
+          style={{ backgroundColor: WELCOME_CREAM }}
+        >
+          <div className="mx-auto w-full max-w-[1180px] px-4 sm:px-6 lg:px-8">
+            <div className="mx-auto max-w-2xl text-center">
+              <p className="font-accent text-[11px] font-bold uppercase tracking-[0.22em] text-[#96724a]">
+                The JO standard
+              </p>
+              <h2 className="font-brand mt-2 text-2xl font-bold text-[#3d1212] sm:text-3xl">
+                Service you can count on
+              </h2>
+              <p className="mt-3 text-sm font-medium leading-relaxed text-[#5a4540] sm:text-base">
+                From booking to drop-off, we focus on safety, comfort, and clear communication.
+              </p>
+            </div>
+            <div className="mt-10 flex flex-wrap justify-center gap-5 sm:gap-6">
+              {[
+                {
+                  title: 'Safe & reliable',
+                  body: 'Your safety is our priority.',
+                  icon: (
+                    <path d="M12 3 4 7v6c0 5 3.5 9 8 10 4.5-1 8-5 8-10V7l-8-4Z" strokeLinejoin="round" />
+                  ),
+                },
+                {
+                  title: 'Professional drivers',
+                  body: 'Experienced, courteous, and background-checked.',
+                  icon: (
+                    <>
+                      <circle cx="12" cy="8" r="3" />
+                      <path d="M5 20v-1a7 7 0 0 1 14 0v1" strokeLinecap="round" />
+                    </>
+                  ),
+                },
+                {
+                  title: 'Always on time',
+                  body: 'Punctual service, every time.',
+                  icon: (
+                    <>
+                      <circle cx="12" cy="12" r="9" />
+                      <path d="M12 7v6l4 2" strokeLinecap="round" />
+                    </>
+                  ),
+                },
+                {
+                  title: 'Premium comfort',
+                  body: 'Luxury vehicles for a first-class experience.',
+                  icon: <path d="M5 16 3 8l2-2 2 10h12l2-10 2 2-2 8H5Z" strokeLinejoin="round" />,
+                },
+                {
+                  title: '24/7 support',
+                  body: "We're here for you anytime.",
+                  icon: (
+                    <>
+                      <path d="M22 16.92v2a2 2 0 0 1-2.18 2 19.8 19.8 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.8 19.8 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h2a2 2 0 0 1 2 1.72c.12.81.3 1.59.54 2.34a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.74-1.11a2 2 0 0 1 2.11-.45c.75.24 1.53.42 2.34.54A2 2 0 0 1 22 16.92Z" />
+                      <circle cx="18" cy="6" r="3.25" />
+                      <path d="M18 4.25V6l1.25 1.25" strokeLinecap="round" />
+                    </>
+                  ),
+                },
+              ].map((item) => (
+                <article
+                  key={item.title}
+                  className="flex w-full max-w-[20.5rem] flex-1 flex-col rounded-2xl border border-[#e8dfd6] bg-white p-6 text-center shadow-[0_2px_24px_-12px_rgba(45,16,16,0.08)] sm:min-h-[200px] sm:max-w-[22rem] sm:p-7"
+                >
+                  <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-xl bg-[#FFFCF9] ring-1 ring-[#e8dfd6]/80">
+                    <svg
+                      className="h-7 w-7 text-[#a68966]"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="1.5"
+                      aria-hidden
+                    >
+                      {item.icon}
+                    </svg>
+                  </div>
+                  <h3 className="font-brand mt-4 text-base font-bold text-[#4a1515] sm:text-lg">{item.title}</h3>
+                  <p className="mt-2 flex-1 text-sm leading-relaxed text-[#4b2220]">{item.body}</p>
+                </article>
+              ))}
+            </div>
+          </div>
+        </section>
+
+      </div>
+
+      <section
+        id="home-how-it-works"
+        className="scroll-mt-28 pb-16 pt-2 sm:pb-20"
+        style={{ backgroundColor: darkMode ? '#0c0b0a' : WELCOME_CREAM }}
+      >
+        <div className="mx-auto w-full max-w-[1180px] px-4 sm:px-6 lg:px-8">
+          <div
+            className={`rounded-3xl border p-6 shadow-[0_4px_40px_-14px_rgba(45,16,16,0.1)] transition-colors sm:p-9 lg:p-10 ${
+              darkMode
+                ? 'border-[#9d3733]/35 bg-[#0f0f0f]'
+                : 'border-[#e8dfd6] bg-white'
+            }`}
+          >
+            <div className="mx-auto max-w-3xl text-center lg:mx-0 lg:max-w-2xl lg:text-left">
+              <p
+                className={`font-accent text-[11px] font-bold uppercase tracking-[0.22em] ${
+                  darkMode ? 'text-[#f2e3bb]/70' : 'text-[#96724a]'
+                }`}
+              >
+                How it works
+              </p>
+              <h2
+                className={`font-brand mt-2 text-2xl font-bold leading-tight sm:text-3xl lg:text-[2rem] ${
+                  darkMode ? 'text-white' : 'text-[#3d1212]'
+                }`}
+              >
+                Book your trip on your phone or computer
+              </h2>
+              <p
+                className={`mt-3 text-sm font-medium leading-relaxed sm:text-base ${
+                  darkMode ? 'text-[#f2e3bb]/75' : 'text-[#5a4540]'
+                }`}
+              >
+                Three quick steps from trip details to your driver—same flow on web and mobile.
+              </p>
+            </div>
+
+            <div className="mt-10 space-y-12 sm:mt-12 sm:space-y-14 lg:space-y-16">
+              {bookingSteps.map((step, index) => (
+                <article
+                  key={step.title}
+                  className={`grid gap-8 lg:grid-cols-2 lg:items-center lg:gap-12 xl:gap-14 ${
+                    index !== bookingSteps.length - 1
+                      ? darkMode
+                        ? 'border-b border-[#9d3733]/25 pb-12 sm:pb-14 lg:pb-16'
+                        : 'border-b border-[#e8dfd6] pb-12 sm:pb-14 lg:pb-16'
+                      : ''
+                  }`}
+                >
+                  <div
+                    className={`relative order-2 overflow-hidden rounded-2xl ring-1 ring-inset lg:order-1 ${
+                      darkMode
+                        ? 'bg-[#161616] ring-[#9d3733]/30'
+                        : 'bg-[#FFFCF9] ring-[#e8dfd6]/90'
+                    }`}
+                  >
+                    <div className="relative aspect-[4/3] w-full max-h-[280px] sm:max-h-[300px] lg:max-h-none lg:min-h-[240px]">
+                      <img
+                        src={step.image}
+                        alt={step.title}
+                        className="h-full w-full object-cover object-center"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="order-1 lg:order-2">
+                    <div className="flex items-start gap-4">
+                      <span
+                        className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-sm font-bold tabular-nums ${
+                          darkMode
+                            ? 'bg-[#9d3733] text-[#f2e3bb]'
+                            : 'bg-[#4a1515] text-white shadow-sm'
+                        }`}
+                        aria-hidden
+                      >
+                        {index + 1}
+                      </span>
+                      <div className="min-w-0 pt-0.5">
+                        <h3
+                          className={`font-brand text-xl font-bold leading-snug sm:text-2xl ${
+                            darkMode ? 'text-white' : 'text-[#3d1212]'
+                          }`}
+                        >
+                          {step.title}
+                        </h3>
+                        <p
+                          className={`mt-3 max-w-xl text-sm leading-relaxed sm:text-base ${
+                            darkMode ? 'text-[#f2e3bb]/80' : 'text-[#4b2220]'
+                          }`}
+                        >
+                          {step.description}
+                        </p>
+                        {authUser?.role !== 'ADMIN' ? (
+                          <button
+                            type="button"
+                            onClick={() => navigateToPage('rider')}
+                            className={`group mt-5 inline-flex items-center gap-2 text-sm font-bold transition focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 ${
+                              darkMode
+                                ? 'text-[#f2e3bb] underline decoration-[#9d3733] decoration-2 underline-offset-[5px] hover:text-white focus-visible:ring-[#9d3733] focus-visible:ring-offset-[#0f0f0f]'
+                                : 'text-[#4a1515] underline decoration-[#4a1515]/35 decoration-2 underline-offset-[5px] hover:decoration-[#4a1515] focus-visible:ring-[#4a1515] focus-visible:ring-offset-white'
+                            }`}
+                          >
+                            {step.cta}
+                            <span
+                              className="transition group-hover:translate-x-0.5"
+                              aria-hidden
+                            >
+                              →
+                            </span>
+                          </button>
+                        ) : null}
+                      </div>
+                    </div>
+                  </div>
+                </article>
+              ))}
+            </div>
+
+            {authUser?.role !== 'ADMIN' ? (
+              <div
+                className={`mt-10 flex flex-col gap-3 border-t pt-8 sm:mt-12 sm:flex-row sm:flex-wrap sm:justify-center sm:gap-4 sm:pt-10 ${
+                  darkMode ? 'border-[#9d3733]/25' : 'border-[#e8dfd6]'
+                }`}
+              >
+                <button
+                  type="button"
+                  onClick={() => navigateToPage('rider')}
+                  className={`inline-flex w-full items-center justify-center gap-2 rounded-xl px-6 py-3.5 text-sm font-bold shadow-md transition focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 sm:w-auto sm:min-w-[220px] ${
+                    darkMode
+                      ? 'bg-[#9d3733] text-[#f2e3bb] hover:bg-[#842f2b] focus-visible:ring-[#f2e3bb] focus-visible:ring-offset-[#0f0f0f]'
+                      : 'bg-[#4a1515] text-white shadow-[0_4px_20px_-8px_rgba(74,21,21,0.4)] hover:bg-[#3d1212] focus-visible:ring-[#4a1515] focus-visible:ring-offset-white'
+                  }`}
+                >
+                  Book rider
+                  <span aria-hidden>→</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => navigateToPage('rider')}
+                  className={`inline-flex w-full items-center justify-center gap-2 rounded-xl border-2 px-6 py-3.5 text-sm font-bold transition focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 sm:w-auto sm:min-w-[220px] ${
+                    darkMode
+                      ? 'border-[#f2e3bb]/40 text-[#f2e3bb] hover:bg-[#f2e3bb]/10 focus-visible:ring-[#f2e3bb] focus-visible:ring-offset-[#0f0f0f]'
+                      : 'border-[#4a1515] bg-transparent text-[#4a1515] hover:bg-[#4a1515]/5 focus-visible:ring-[#4a1515] focus-visible:ring-offset-white'
+                  }`}
+                >
+                  Start a ride
+                </button>
+              </div>
+            ) : null}
           </div>
         </div>
       </section>
 
       <footer
-        className={`border-t transition-colors duration-300 ${
+        id="site-footer"
+        className={`scroll-mt-28 border-t transition-colors duration-300 ${
           darkMode ? 'border-[#9d3733]/35 bg-[#060606]' : 'border-[#9d3733]/30 bg-[#f7ecd0]'
         }`}
       >
@@ -2688,35 +3125,54 @@ function App() {
                 <a
                   href="#"
                   aria-label="Follow JO on X"
-                  className={`rounded-full border p-2 transition ${
+                  className={`inline-flex h-10 w-10 items-center justify-center rounded-full border transition ${
                     darkMode
                       ? 'border-[#f2e3bb]/25 text-[#f2e3bb]/80 hover:border-[#9d3733] hover:text-[#9d3733]'
                       : 'border-[#9d3733]/35 text-[#4b2220] hover:border-[#9d3733] hover:text-[#9d3733]'
                   }`}
                 >
-                  <span className="text-xs font-bold">X</span>
+                  <svg className="h-4 w-4" aria-hidden="true" focusable="false">
+                    <use href="/icons.svg#x-icon" />
+                  </svg>
                 </a>
                 <a
                   href="#"
                   aria-label="Follow JO on Instagram"
-                  className={`rounded-full border p-2 transition ${
+                  className={`inline-flex h-10 w-10 items-center justify-center rounded-full border transition ${
                     darkMode
                       ? 'border-[#f2e3bb]/25 text-[#f2e3bb]/80 hover:border-[#9d3733] hover:text-[#9d3733]'
                       : 'border-[#9d3733]/35 text-[#4b2220] hover:border-[#9d3733] hover:text-[#9d3733]'
                   }`}
                 >
-                  <span className="text-xs font-bold">IG</span>
+                  <svg className="h-4 w-4" aria-hidden="true" focusable="false">
+                    <use href="/icons.svg#instagram-icon" />
+                  </svg>
                 </a>
                 <a
                   href="#"
                   aria-label="Follow JO on Facebook"
-                  className={`rounded-full border p-2 transition ${
+                  className={`inline-flex h-10 w-10 items-center justify-center rounded-full border transition ${
                     darkMode
                       ? 'border-[#f2e3bb]/25 text-[#f2e3bb]/80 hover:border-[#9d3733] hover:text-[#9d3733]'
                       : 'border-[#9d3733]/35 text-[#4b2220] hover:border-[#9d3733] hover:text-[#9d3733]'
                   }`}
                 >
-                  <span className="text-xs font-bold">FB</span>
+                  <svg className="h-4 w-4" aria-hidden="true" focusable="false">
+                    <use href="/icons.svg#facebook-icon" />
+                  </svg>
+                </a>
+                <a
+                  href="#"
+                  aria-label="Follow JO on LinkedIn"
+                  className={`inline-flex h-10 w-10 items-center justify-center rounded-full border transition ${
+                    darkMode
+                      ? 'border-[#f2e3bb]/25 text-[#f2e3bb]/80 hover:border-[#9d3733] hover:text-[#9d3733]'
+                      : 'border-[#9d3733]/35 text-[#4b2220] hover:border-[#9d3733] hover:text-[#9d3733]'
+                  }`}
+                >
+                  <svg className="h-4 w-4" aria-hidden="true" focusable="false">
+                    <use href="/icons.svg#linkedin-icon" />
+                  </svg>
                 </a>
               </div>
             </div>
