@@ -312,10 +312,10 @@ router.patch('/:id/locations', requireAuth, requireRole('RIDER'), async (req, re
     }
     const { userId } = req as AuthedRequest;
     const pending = await prisma.ride.findFirst({
-      where: { id: rideId, riderId: userId, status: 'REQUESTED' },
+      where: { id: rideId, riderId: userId, status: { in: ['REQUESTED', 'ACCEPTED'] } },
     });
     if (!pending) {
-      throw new HttpError(404, 'No pending ride to update, or it is not yours.');
+      throw new HttpError(404, 'No active pickup ride to update, or it is not yours.');
     }
     const updated = await prisma.ride.update({
       where: { id: rideId },
@@ -353,13 +353,21 @@ router.patch('/:id/locations', requireAuth, requireRole('RIDER'), async (req, re
       fareEstimate: updated.fareEstimate,
       riderName: updated.rider.name,
     };
-    if (updated.driverId) {
-      broadcastRideOffer([updated.driverId], offerPayload);
+    if (updated.status === 'REQUESTED') {
+      if (updated.driverId) {
+        broadcastRideOffer([updated.driverId], offerPayload);
+      } else {
+        const driverIds = await nearbyDriverUserIdsForPickup(body.pickupLat, body.pickupLng);
+        broadcastRideOffer(driverIds, offerPayload);
+      }
+      broadcastRideOfferUpdate({ ...offerPayload, updated: true });
+    } else if (updated.status === 'ACCEPTED' && updated.driverId) {
+      // During pickup navigation, push location updates directly to the assigned driver.
+      emitToUser(updated.driverId, 'ride:offer_update', { ...offerPayload, updated: true });
     } else {
       const driverIds = await nearbyDriverUserIdsForPickup(body.pickupLat, body.pickupLng);
       broadcastRideOffer(driverIds, offerPayload);
     }
-    broadcastRideOfferUpdate({ ...offerPayload, updated: true });
     emitRideUpdate(updated.id, { rideId: updated.id, status: updated.status, ride: updated });
     res.json(updated);
   } catch (e) {

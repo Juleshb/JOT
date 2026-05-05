@@ -103,7 +103,9 @@ export default function DriverPage({
   const [actionBusy, setActionBusy] = useState(false)
   const [offerId, setOfferId] = useState('')
   const [offerPopup, setOfferPopup] = useState(null)
+  const [pickupMovedToast, setPickupMovedToast] = useState('')
   const offerPopupRef = useRef(null)
+  const activeRideRef = useRef(null)
   const [liveLocation, setLiveLocation] = useState(null)
   const [mapWebGlError, setMapWebGlError] = useState(null)
   const [driverBasemapMode, setDriverBasemapMode] = useState('transit')
@@ -155,6 +157,13 @@ export default function DriverPage({
   isOnlineRef.current = isOnline
   liveLocationRef.current = liveLocation
   offerPopupRef.current = offerPopup
+  activeRideRef.current = activeRide
+
+  useEffect(() => {
+    if (!pickupMovedToast) return undefined
+    const t = window.setTimeout(() => setPickupMovedToast(''), 4500)
+    return () => window.clearTimeout(t)
+  }, [pickupMovedToast])
 
   useLayoutEffect(() => {
     setNavigationSpeechEnabled(!driverNavVoiceMuted)
@@ -941,6 +950,25 @@ export default function DriverPage({
     socket.on('ride:offer_update', (payload) => {
       if (!payload?.rideId) return
       setOfferPopup((prev) => (prev?.rideId === payload.rideId ? { ...prev, ...payload } : prev))
+
+      const current = activeRideRef.current
+      if (!current || current.id !== payload.rideId || current.status !== 'ACCEPTED') return
+
+      const nextPickupLat = Number(payload.pickupLat)
+      const nextPickupLng = Number(payload.pickupLng)
+      const hasNextCoords = Number.isFinite(nextPickupLat) && Number.isFinite(nextPickupLng)
+      const pickupMoved =
+        hasNextCoords &&
+        (Math.abs(nextPickupLat - Number(current.pickupLat)) > 0.00002 ||
+          Math.abs(nextPickupLng - Number(current.pickupLng)) > 0.00002)
+      const addrChanged =
+        typeof payload.pickupAddress === 'string' &&
+        payload.pickupAddress.trim() &&
+        payload.pickupAddress.trim() !== String(current.pickupAddress ?? '').trim()
+
+      if (pickupMoved || addrChanged) {
+        setPickupMovedToast('Rider moved pickup. Route updated.')
+      }
     })
 
     return () => {
@@ -1284,6 +1312,29 @@ export default function DriverPage({
 
   return (
     <div className={fullMapMode ? `w-full ${darkMode ? 'bg-black' : 'bg-[#fffbf5]'}` : shellClass}>
+      {pickupMovedToast && (
+        <div className="pointer-events-none fixed right-4 top-24 z-[140] max-w-sm">
+          <div
+            className={`pointer-events-auto rounded-xl border px-4 py-3 text-sm font-semibold shadow-xl ${
+              darkMode
+                ? 'border-[#9d3733]/55 bg-black/85 text-[#f2e3bb]'
+                : 'border-[#9d3733]/35 bg-white text-[#2d100f]'
+            }`}
+          >
+            <div className="flex items-start justify-between gap-3">
+              <p>{pickupMovedToast}</p>
+              <button
+                type="button"
+                onClick={() => setPickupMovedToast('')}
+                className="rounded p-1 text-xs opacity-80 transition hover:bg-[#9d3733]/15 hover:opacity-100"
+                aria-label="Dismiss pickup update notice"
+              >
+                ×
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {offerPopup && (
         <div
           className={`fixed z-[125] w-[min(92vw,380px)] rounded-2xl border border-[#9d3733]/60 bg-[#111] p-4 text-[#f2e3bb] shadow-2xl shadow-black/40 ${

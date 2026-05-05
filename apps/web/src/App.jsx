@@ -984,11 +984,11 @@ function App() {
     }
   }, [activePage, authToken, authUser?.role, activeRide?.id, activeRide?.status])
 
-  /** While waiting for a driver, push pickup updates if the rider moves with GPS follow on. */
+  /** While waiting for/meeting a driver, push pickup updates if the rider moves with GPS follow on. */
   useEffect(() => {
     if (activePage !== 'rider' || !authToken) return undefined
     const ride = activeRideRef.current
-    if (!ride || ride.status !== 'REQUESTED') return undefined
+    if (!ride || !['REQUESTED', 'ACCEPTED'].includes(ride.status)) return undefined
     if (!pickupFollowsDeviceGpsRef.current) return undefined
 
     const pick = riderCoords.pickup
@@ -999,7 +999,7 @@ function App() {
     const tid = window.setTimeout(async () => {
       if (cancelled) return
       const r = activeRideRef.current
-      if (!r || r.id !== ride.id || r.status !== 'REQUESTED') return
+      if (!r || r.id !== ride.id || !['REQUESTED', 'ACCEPTED'].includes(r.status)) return
       if (!pickupFollowsDeviceGpsRef.current) return
       const rc = riderCoordsRef.current
       const d = haversineMeters(r.pickupLat, r.pickupLng, rc.pickup.lat, rc.pickup.lng)
