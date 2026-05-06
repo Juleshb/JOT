@@ -21,13 +21,13 @@ import { formatDurationHoursMinutes } from './lib/formatDuration'
 import { estimateRideFareUsd } from './lib/estimateFare'
 import { addTrafficToMap, removeTrafficFromMap } from './lib/mapTraffic'
 import { getBasemapStyleUrl } from './lib/mapStyles'
-import { openGoogleStreetView } from './lib/streetView'
 import mapboxgl from 'mapbox-gl'
 import { io } from 'socket.io-client'
 import RiderPage from './pages/RiderPage'
 import DriverPage from './pages/DriverPage'
 import AdminPage from './pages/AdminPage'
 import AboutPage from './pages/AboutPage'
+import ContactPage from './pages/ContactPage'
 
 const pageToPath = {
   home: '/',
@@ -36,12 +36,24 @@ const pageToPath = {
   admin: '/admin',
   profile: '/profile',
   about: '/about',
+  contact: '/contact',
+}
+
+/** Avoid losing stars when refetch returns the same ride without `rating` (race / stale `/rides/active`). */
+function rideHasPersistedRating(ride) {
+  return Boolean(ride?.rating && typeof ride.rating.stars === 'number')
 }
 
 /** Matches studio hero art / mockup cream so the vehicle plate blends with the page. */
 const WELCOME_CREAM = '#F5EFE6'
 /** Solid panel fill (no transparency). */
 const WELCOME_CONTENT_PANEL_BG = '#FFFCF9'
+
+/** Rider map default region before pickup/drop are set (Dallas, TX). */
+const DALLAS_DEFAULT_RIDER_COORDS = {
+  pickup: { lat: 32.7767, lng: -96.797 },
+  dropoff: { lat: 32.7906, lng: -96.8044 },
+}
 
 /** Hero carousel images (JPEG assets in public/). */
 const WELCOME_HERO_SLIDES = [
@@ -78,6 +90,7 @@ const getPageFromPath = (pathname) => {
   if (pathname === '/admin') return 'admin'
   if (pathname === '/profile') return 'profile'
   if (pathname === '/about') return 'about'
+  if (pathname === '/contact') return 'contact'
   return 'home'
 }
 
@@ -172,7 +185,7 @@ function haversineMeters(aLat, aLng, bLat, bLng) {
 }
 
 function App() {
-  const [darkMode, setDarkMode] = useState(false)
+  const darkMode = false
   const [authToken, setAuthToken] = useState(
     () => localStorage.getItem('jo-auth-token') ?? '',
   )
@@ -239,10 +252,10 @@ function App() {
     }
   }, [])
 
-  const [riderCoords, setRiderCoords] = useState({
-    pickup: { lat: -1.9441, lng: 30.0619 },
-    dropoff: { lat: -1.9536, lng: 30.0925 },
-  })
+  const [riderCoords, setRiderCoords] = useState(() => ({
+    pickup: { ...DALLAS_DEFAULT_RIDER_COORDS.pickup },
+    dropoff: { ...DALLAS_DEFAULT_RIDER_COORDS.dropoff },
+  }))
   const [pickupSuggestions, setPickupSuggestions] = useState([])
   const [dropoffSuggestions, setDropoffSuggestions] = useState([])
   const [pickupSearchBusy, setPickupSearchBusy] = useState(false)
@@ -801,19 +814,6 @@ function App() {
   selectedRouteIndexRef.current = selectedRouteIndex
 
   useEffect(() => {
-    const savedMode = localStorage.getItem('jo-theme')
-    if (savedMode) {
-      setDarkMode(savedMode === 'dark')
-      return
-    }
-    setDarkMode(false)
-  }, [])
-
-  useEffect(() => {
-    localStorage.setItem('jo-theme', darkMode ? 'dark' : 'light')
-  }, [darkMode])
-
-  useEffect(() => {
     const handlePopState = () => {
       setActivePage(getPageFromPath(window.location.pathname))
     }
@@ -1047,10 +1047,28 @@ function App() {
       setRiderMessage('')
       const [active, history] = await Promise.all([
         getActiveRide(authToken),
-        getRideHistory(authToken, 8),
+        getRideHistory(authToken, 50),
       ])
-      setActiveRide(active)
-      setRideHistory(Array.isArray(history) ? history : [])
+      const historyArr = Array.isArray(history) ? history : []
+      setActiveRide((prev) => {
+        if (active == null) return null
+        if (
+          prev &&
+          prev.id === active.id &&
+          rideHasPersistedRating(prev) &&
+          !rideHasPersistedRating(active)
+        ) {
+          return { ...active, rating: prev.rating }
+        }
+        if (active.id && !rideHasPersistedRating(active)) {
+          const fromHist = historyArr.find((r) => r.id === active.id && rideHasPersistedRating(r))
+          if (fromHist?.rating) {
+            return { ...active, rating: fromHist.rating }
+          }
+        }
+        return active
+      })
+      setRideHistory(historyArr)
       return { active, history }
     } catch (error) {
       setRiderMessage(error.message || 'Unable to load rider data.')
@@ -2021,10 +2039,6 @@ function App() {
     return () => window.removeEventListener('resize', onResize)
   }, [activePage])
 
-  const handleRiderOpenStreetView = useCallback(() => {
-    openGoogleStreetView(riderCoords.pickup.lat, riderCoords.pickup.lng)
-  }, [riderCoords.pickup.lat, riderCoords.pickup.lng])
-
   const handleCancelRide = async () => {
     if (!authToken || !activeRide?.id) return
     try {
@@ -2187,6 +2201,17 @@ function App() {
             >
               About
             </button>
+            <button
+              type="button"
+              onClick={() => navigateToPage('contact')}
+              className={`rounded-full px-3 py-1.5 transition ${
+                activePage === 'contact'
+                  ? 'bg-[#9d3733] text-[#f2e3bb]'
+                  : 'hover:bg-[#9d3733]/10 hover:text-[#9d3733]'
+              }`}
+            >
+              Contact
+            </button>
           </nav>
           <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
             <button
@@ -2206,58 +2231,6 @@ function App() {
                   <path d="M4 7h16M4 12h16M4 17h16" strokeLinecap="round" />
                 )}
               </svg>
-            </button>
-            <button
-              type="button"
-              onClick={() => setDarkMode((prev) => !prev)}
-              aria-label={`Switch to ${darkMode ? 'light' : 'dark'} mode`}
-              className={`relative flex h-8 w-14 items-center rounded-full border px-1 transition-all duration-300 sm:h-10 sm:w-18 ${
-                darkMode
-                  ? 'border-[#f2e3bb]/35 bg-[#111] hover:border-white'
-                  : 'border-[#9d3733]/40 bg-[#fff8eb] hover:border-[#9d3733]'
-              }`}
-            >
-              <span
-                className={`absolute inline-flex h-6 w-6 items-center justify-center rounded-full transition-all duration-300 sm:h-8 sm:w-8 ${
-                  darkMode
-                    ? 'translate-x-0 bg-[#f2e3bb] text-[#9d3733]'
-                    : 'translate-x-6 bg-[#9d3733] text-[#f2e3bb] sm:translate-x-8'
-                }`}
-              >
-                <svg
-                  viewBox="0 0 24 24"
-                  className={`h-3.5 w-3.5 transition-transform duration-500 sm:h-4 sm:w-4 ${
-                    darkMode ? 'rotate-0' : 'rotate-180'
-                  }`}
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  aria-hidden="true"
-                >
-                  {darkMode ? (
-                    <>
-                      <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
-                    </>
-                  ) : (
-                    <>
-                      <circle cx="12" cy="12" r="4" />
-                      <path d="M12 2v2" />
-                      <path d="M12 20v2" />
-                      <path d="m4.93 4.93 1.41 1.41" />
-                      <path d="m17.66 17.66 1.41 1.41" />
-                      <path d="M2 12h2" />
-                      <path d="M20 12h2" />
-                      <path d="m6.34 17.66-1.41 1.41" />
-                      <path d="m19.07 4.93-1.41 1.41" />
-                    </>
-                  )}
-                </svg>
-              </span>
-              <span className="sr-only">
-                {darkMode ? 'Switch to light mode' : 'Switch to dark mode'}
-              </span>
             </button>
             {authUser ? (
               <div className="relative" ref={userMenuRef}>
@@ -2415,6 +2388,15 @@ function App() {
               >
                 About
               </button>
+              <button
+                type="button"
+                onClick={() => navigateToPage('contact')}
+                className={`rounded-xl px-3 py-2 text-left font-semibold ${
+                  activePage === 'contact' ? 'bg-[#9d3733] text-[#f2e3bb]' : 'hover:bg-[#9d3733]/10'
+                }`}
+              >
+                Contact
+              </button>
             </div>
           </div>
         )}
@@ -2567,6 +2549,7 @@ function App() {
           mapWebGlError={mapWebGlError}
           mapContainerRef={mapContainerRef}
           fetchRiderData={fetchRiderData}
+          setActiveRide={setActiveRide}
           activeRide={activeRide}
           rideHistory={rideHistory}
           requestPreferredDriver={requestPreferredDriver}
@@ -2574,14 +2557,11 @@ function App() {
           setRiderMessage={setRiderMessage}
           handleCancelRide={handleCancelRide}
           navigateToPage={navigateToPage}
-          riderBasemapMode={riderBasemapMode}
-          setRiderBasemapMode={setRiderBasemapMode}
-          riderTrafficOn={riderTrafficOn}
-          setRiderTrafficOn={setRiderTrafficOn}
-          onOpenStreetView={handleRiderOpenStreetView}
         />
       ) : activePage === 'about' ? (
-        <AboutPage darkMode={darkMode} navigateToPage={navigateToPage} />
+        <AboutPage navigateToPage={navigateToPage} />
+      ) : activePage === 'contact' ? (
+        <ContactPage navigateToPage={navigateToPage} />
       ) : (
         <>
       <div className="text-[#2d100f]">
@@ -3096,7 +3076,10 @@ function App() {
           </div>
         </div>
       </section>
+        </>
+      )}
 
+      {(activePage === 'home' || activePage === 'about' || activePage === 'contact') && (
       <footer
         id="site-footer"
         className={`scroll-mt-28 border-t transition-colors duration-300 ${
@@ -3234,7 +3217,14 @@ function App() {
                 <a href="#" className="transition hover:text-[#9d3733]">
                   Safety
                 </a>
-                <a href="#" className="transition hover:text-[#9d3733]">
+                <a
+                  href="#"
+                  onClick={(e) => {
+                    e.preventDefault()
+                    navigateToPage('contact')
+                  }}
+                  className="transition hover:text-[#9d3733]"
+                >
                   Contact
                 </a>
               </div>
@@ -3261,7 +3251,6 @@ function App() {
           </div>
         </div>
       </footer>
-        </>
       )}
 
       <AuthModal

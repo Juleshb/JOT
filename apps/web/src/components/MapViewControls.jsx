@@ -25,7 +25,7 @@ export default function MapViewControls({
     >
       <div
         className={`inline-flex flex-wrap justify-center gap-1 rounded-xl border p-0.5 ${
-          darkMode ? 'border-[#9d3733]/40 bg-black/50' : 'border-[#9d3733]/25 bg-white/80'
+          darkMode ? 'border-[#9d3733]/40 bg-black/50' : 'border-[#e8dfd6] bg-white/95 shadow-sm'
         }`}
         role="group"
         aria-label="Map type"
@@ -42,10 +42,10 @@ export default function MapViewControls({
               }}
               className={`${chipBase} ${
                 active
-                  ? 'bg-[#9d3733] text-[#f2e3bb] shadow-sm'
+                  ? 'bg-[#4a1515] text-white shadow-sm'
                   : darkMode
                     ? 'text-[#f2e3bb]/85 hover:bg-[#9d3733]/20'
-                    : 'text-[#2d100f] hover:bg-[#9d3733]/10'
+                    : 'text-[#2d100f] hover:bg-[#ede8e0]'
               }`}
             >
               {label}
@@ -76,7 +76,7 @@ export default function MapViewControls({
           className={`${chipBase} border ${
             darkMode
               ? 'border-[#9d3733]/35 text-[#f2e3bb] hover:bg-[#9d3733]/15'
-              : 'border-[#9d3733]/30 text-[#2d100f] hover:bg-[#9d3733]/10'
+              : 'border-[#e8dfd6] text-[#2d100f] hover:bg-[#FFFCF9]'
           }`}
         >
           Street view

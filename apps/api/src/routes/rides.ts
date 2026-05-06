@@ -270,7 +270,8 @@ router.get('/active', requireAuth, async (req, res, next) => {
           riderId: userId,
           status: 'COMPLETED',
           driverId: { not: null },
-          rating: null,
+          /** Must use relation filter — plain `rating: null` does not exclude rated rides in Prisma 6. */
+          rating: { is: null },
         },
         orderBy: { completedAt: 'desc' },
         include: activeRideInclude,
@@ -553,7 +554,7 @@ router.post('/:id/rate', requireAuth, requireRole('RIDER'), async (req, res, nex
           riderId: userId,
           status: 'COMPLETED',
           driverId: { not: null },
-          rating: null,
+          rating: { is: null },
         },
       });
       if (!pending?.driverId) {

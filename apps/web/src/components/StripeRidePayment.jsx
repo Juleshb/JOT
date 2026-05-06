@@ -44,7 +44,7 @@ function PaymentForm({ darkMode, onSucceeded, onError }) {
     <form onSubmit={handleSubmit} className="space-y-4">
       <div
         className={`rounded-xl border p-3 ${
-          darkMode ? 'border-[#9d3733]/35 bg-black/50' : 'border-[#9d3733]/25 bg-white'
+          darkMode ? 'border-[#9d3733]/35 bg-black/50' : 'border-[#e8dfd6] bg-white'
         }`}
       >
         <PaymentElement />
@@ -52,7 +52,7 @@ function PaymentForm({ darkMode, onSucceeded, onError }) {
       <button
         type="submit"
         disabled={!stripe || submitting}
-        className="w-full rounded-xl bg-[#9d3733] py-3 text-sm font-bold text-[#f2e3bb] transition hover:bg-[#842f2b] disabled:opacity-60"
+        className="w-full rounded-xl bg-[#4a1515] py-3 text-sm font-bold text-white transition hover:bg-[#3d1212] disabled:opacity-60"
       >
         {submitting ? 'Processing…' : 'Pay and request ride'}
       </button>
@@ -70,7 +70,7 @@ export function StripeRidePayment({ clientSecret, darkMode, onSucceeded, onError
     appearance: {
       theme: darkMode ? 'night' : 'stripe',
       variables: {
-        colorPrimary: '#9d3733',
+        colorPrimary: '#4a1515',
         borderRadius: '12px',
       },
     },

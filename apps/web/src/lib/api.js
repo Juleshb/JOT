@@ -193,6 +193,13 @@ export async function rateRide(token, rideId, stars) {
   })
 }
 
+export async function sendContactMessage(payload) {
+  return request('/contact', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
 export async function adminOverview(token) {
   return request('/admin/overview', {
     headers: {

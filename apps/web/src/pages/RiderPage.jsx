@@ -3,8 +3,37 @@ import { io } from 'socket.io-client'
 import { formatDurationHoursMinutes } from '../lib/formatDuration'
 import { formatUsd } from '../lib/estimateFare'
 import { createRidePaymentIntent, getNearbyDrivers, rateRide } from '../lib/api'
-import MapViewControls from '../components/MapViewControls'
 import { StripeRidePayment, stripePublishableConfigured } from '../components/StripeRidePayment'
+
+/** True when the ride already has a rider-submitted star rating (persisted or visible in history). */
+function rideHasRiderRating(ride) {
+  return Boolean(ride?.rating && typeof ride.rating.stars === 'number')
+}
+
+const RATED_RIDES_STORAGE_KEY = 'jo-rider-rated-ride-ids'
+const MAX_PERSISTED_RATED_IDS = 200
+
+function loadPersistedRatedRideIds() {
+  if (typeof window === 'undefined') return new Set()
+  try {
+    const raw = window.localStorage.getItem(RATED_RIDES_STORAGE_KEY)
+    const arr = raw ? JSON.parse(raw) : []
+    if (!Array.isArray(arr)) return new Set()
+    return new Set(arr.map(String).filter(Boolean))
+  } catch {
+    return new Set()
+  }
+}
+
+function persistRatedRideIds(set) {
+  if (typeof window === 'undefined') return
+  try {
+    const arr = [...set].map(String).filter(Boolean).slice(-MAX_PERSISTED_RATED_IDS)
+    window.localStorage.setItem(RATED_RIDES_STORAGE_KEY, JSON.stringify(arr))
+  } catch {
+    /* ignore quota / private mode */
+  }
+}
 
 export default function RiderPage({
   darkMode,
@@ -32,6 +61,7 @@ export default function RiderPage({
   mapWebGlError,
   mapContainerRef,
   fetchRiderData,
+  setActiveRide,
   activeRide,
   rideHistory,
   requestPreferredDriver,
@@ -39,17 +69,14 @@ export default function RiderPage({
   setRiderMessage,
   handleCancelRide,
   navigateToPage,
-  riderBasemapMode,
-  setRiderBasemapMode,
-  riderTrafficOn,
-  setRiderTrafficOn,
-  onOpenStreetView,
 }) {
-  const MAP_VIEW_STORAGE_KEY = 'jo-ride-map-view'
   /** Drivers at or beyond this distance (km) get a non-blocking “far” warning. */
   const FAR_DRIVER_KM_THRESHOLD = 8
+  const RIDES_HISTORY_PAGE_SIZE = 5
 
   const [bookModalOpen, setBookModalOpen] = useState(false)
+  const [rideHistoryModalOpen, setRideHistoryModalOpen] = useState(false)
+  const [rideHistoryPage, setRideHistoryPage] = useState(0)
   const [paymentModalOpen, setPaymentModalOpen] = useState(false)
   const [payView, setPayView] = useState('choose')
   const [paymentFareUsd, setPaymentFareUsd] = useState(null)
@@ -63,21 +90,77 @@ export default function RiderPage({
   const [realtimeStatusLine, setRealtimeStatusLine] = useState('Waiting for driver response…')
   const [toastNotification, setToastNotification] = useState('')
   const waitingVoiceAtRef = useRef(0)
-  const [mapViewMode, setMapViewMode] = useState(() => {
-    if (typeof window === 'undefined') return 'driver'
-    return window.localStorage.getItem(MAP_VIEW_STORAGE_KEY) === 'classic' ? 'classic' : 'driver'
-  })
+  /** Ride ids the rider has already submitted a rating for (session + localStorage). */
+  const ratedRideIdsRef = useRef(undefined)
+  if (ratedRideIdsRef.current === undefined) {
+    ratedRideIdsRef.current = loadPersistedRatedRideIds()
+  }
+  /** Keep map overlay hidden for this ride after submit until refetch clears it or a new ride loads. */
+  const suppressActiveRideOverlayForRideIdRef = useRef(null)
   const [ratingStarsDraft, setRatingStarsDraft] = useState(0)
   const [ratingBusy, setRatingBusy] = useState(false)
-  /** After submit: show congratulations until dismissed (`rating` = saved `RideRating` row). */
-  const [ratingThanks, setRatingThanks] = useState(null)
 
-  const isDriverMapView = mapViewMode === 'driver'
+  /** Full-bleed map layout (classic side-by-side toggle removed). */
+  const isDriverMapView = true
+
+  const ratedInHistoryForActiveRide =
+    Boolean(activeRide?.id) &&
+    rideHistory.some((r) => r.id === activeRide.id && rideHasRiderRating(r))
 
   const needsRiderRating =
     activeRide?.status === 'COMPLETED' &&
-    !activeRide?.rating &&
-    Boolean(activeRide.driverId)
+    Boolean(activeRide.driverId) &&
+    !rideHasRiderRating(activeRide) &&
+    !ratedRideIdsRef.current.has(String(activeRide?.id ?? '')) &&
+    !ratedInHistoryForActiveRide
+
+  const isCompletedRatedTrip =
+    activeRide?.status === 'COMPLETED' &&
+    (rideHasRiderRating(activeRide) ||
+      ratedInHistoryForActiveRide ||
+      ratedRideIdsRef.current.has(String(activeRide?.id ?? '')))
+
+  /** Hide map Active Ride panel immediately after rating submit (before refetch settles). */
+  const [hideRideOverlayAfterRating, setHideRideOverlayAfterRating] = useState(false)
+
+  const showActiveRideMapOverlay =
+    authUser &&
+    !hideRideOverlayAfterRating &&
+    ((riderBusy && !activeRide) || (activeRide && !isCompletedRatedTrip))
+
+  useEffect(() => {
+    if (!authUser) {
+      suppressActiveRideOverlayForRideIdRef.current = null
+      setHideRideOverlayAfterRating(false)
+      return
+    }
+
+    const id = activeRide?.id != null ? String(activeRide.id) : null
+
+    if (id !== null && suppressActiveRideOverlayForRideIdRef.current && id !== suppressActiveRideOverlayForRideIdRef.current) {
+      suppressActiveRideOverlayForRideIdRef.current = null
+    }
+
+    if (id === null) {
+      if (suppressActiveRideOverlayForRideIdRef.current) {
+        setHideRideOverlayAfterRating(true)
+      } else {
+        setHideRideOverlayAfterRating(false)
+      }
+      return
+    }
+
+    if (suppressActiveRideOverlayForRideIdRef.current && id === suppressActiveRideOverlayForRideIdRef.current) {
+      setHideRideOverlayAfterRating(true)
+      return
+    }
+
+    setHideRideOverlayAfterRating(false)
+  }, [authUser, activeRide?.id])
+
+  useEffect(() => {
+    if (!needsRiderRating) setRatingStarsDraft(0)
+  }, [needsRiderRating])
 
   const selectedFareUsd = routeOptions[selectedRouteIndex]?.priceUsd ?? null
 
@@ -362,19 +445,13 @@ export default function RiderPage({
     }
   }
 
-  useEffect(() => {
-    window.localStorage.setItem(MAP_VIEW_STORAGE_KEY, mapViewMode)
-    const id = requestAnimationFrame(() => window.dispatchEvent(new Event('resize')))
-    return () => cancelAnimationFrame(id)
-  }, [mapViewMode])
-
   const suggestionPanelClass = (darkMode) =>
-    `absolute left-0 right-0 top-full z-30 mt-1 max-h-64 overflow-auto rounded-lg border text-xs shadow-lg sm:max-h-72 ${
-      darkMode ? 'border-[#9d3733]/40 bg-black' : 'border-[#9d3733]/25 bg-white'
+    `absolute left-0 right-0 top-full z-30 mt-1 max-h-64 overflow-auto rounded-xl border text-xs shadow-lg ring-1 ring-black/5 sm:max-h-72 ${
+      darkMode ? 'border-[#9d3733]/40 bg-black' : 'border-[#e8dfd6] bg-white'
     }`
 
-  const fieldClass = `w-full rounded-xl border px-4 py-3 text-base outline-none transition xl:py-2.5 xl:text-sm ${
-    darkMode ? 'border-[#9d3733]/45 bg-black' : 'border-[#9d3733]/30 bg-white'
+  const fieldClass = `w-full rounded-xl border px-4 py-3 text-base text-[#2d100f] outline-none transition placeholder:text-[#7a6a62] focus:border-[#4a1515] focus:ring-2 focus:ring-[#4a1515]/15 xl:py-2.5 xl:text-sm ${
+    darkMode ? 'border-[#9d3733]/45 bg-black' : 'border-[#e8dfd6] bg-[#FFFCF9]'
   }`
 
   useEffect(() => {
@@ -385,6 +462,21 @@ export default function RiderPage({
       document.body.style.overflow = previousOverflow
     }
   }, [bookModalOpen])
+
+  useEffect(() => {
+    if (!rideHistoryModalOpen) return
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      document.body.style.overflow = previousOverflow
+    }
+  }, [rideHistoryModalOpen])
+
+  useEffect(() => {
+    if (!rideHistoryModalOpen || rideHistory.length === 0) return
+    const maxPage = Math.max(0, Math.ceil(rideHistory.length / RIDES_HISTORY_PAGE_SIZE) - 1)
+    setRideHistoryPage((p) => Math.min(p, maxPage))
+  }, [rideHistoryModalOpen, rideHistory.length])
 
   const bookRideFields = (
     <div className="space-y-4">
@@ -410,7 +502,7 @@ export default function RiderPage({
         {showPickupSuggestions && (
           <div className={suggestionPanelClass(darkMode)}>
             {pickupSearchBusy ? (
-              <p className="px-3 py-2 text-[#9d3733]">Searching pickup...</p>
+              <p className="px-3 py-2 font-medium text-[#4a1515]">Searching pickup...</p>
             ) : pickupSuggestions.length > 0 ? (
               pickupSuggestions.map((suggestion) => (
                 <button
@@ -421,7 +513,7 @@ export default function RiderPage({
                   className={`block w-full border-b px-3 py-2 text-left transition last:border-b-0 ${
                     darkMode
                       ? 'border-[#9d3733]/20 hover:bg-[#9d3733]/20'
-                      : 'border-[#9d3733]/15 hover:bg-[#9d3733]/10'
+                      : 'border-[#ede8e0] hover:bg-[#FFFCF9]'
                   }`}
                 >
                   {suggestion.badge ? (
@@ -463,7 +555,7 @@ export default function RiderPage({
         {showDropoffSuggestions && (
           <div className={suggestionPanelClass(darkMode)}>
             {dropoffSearchBusy ? (
-              <p className="px-3 py-2 text-[#9d3733]">Searching dropoff...</p>
+              <p className="px-3 py-2 font-medium text-[#4a1515]">Searching dropoff...</p>
             ) : dropoffSuggestions.length > 0 ? (
               dropoffSuggestions.map((suggestion) => (
                 <button
@@ -474,7 +566,7 @@ export default function RiderPage({
                   className={`block w-full border-b px-3 py-2 text-left transition last:border-b-0 ${
                     darkMode
                       ? 'border-[#9d3733]/20 hover:bg-[#9d3733]/20'
-                      : 'border-[#9d3733]/15 hover:bg-[#9d3733]/10'
+                      : 'border-[#ede8e0] hover:bg-[#FFFCF9]'
                   }`}
                 >
                   {suggestion.badge ? (
@@ -535,10 +627,10 @@ export default function RiderPage({
         className={`rounded-xl border px-3 py-3 text-xs ${
           darkMode
             ? 'border-[#9d3733]/40 bg-black text-[#f2e3bb]/90'
-            : 'border-[#9d3733]/25 bg-white text-[#4b2220]'
+            : 'border-[#e8dfd6] bg-[#FFFCF9] text-[#4b2220]'
         }`}
       >
-        <p className="font-semibold text-[#9d3733]">Trip coordinates</p>
+        <p className="font-semibold text-[#4a1515]">Trip coordinates</p>
         <p className="mt-1 font-mono text-[11px]">
           Pickup: {riderCoords.pickup.lat}, {riderCoords.pickup.lng}
         </p>
@@ -550,10 +642,10 @@ export default function RiderPage({
       {routeOptions.length > 0 && (
         <div
           className={`rounded-xl border px-2 py-2 ${
-            darkMode ? 'border-[#9d3733]/35 bg-black/60' : 'border-[#9d3733]/20 bg-white'
+            darkMode ? 'border-[#9d3733]/35 bg-black/60' : 'border-[#e8dfd6] bg-white shadow-[0_2px_24px_-12px_rgba(45,16,16,0.08)]'
           }`}
         >
-          <p className="px-1 pb-0.5 text-xs font-semibold text-[#9d3733]">
+          <p className="px-1 pb-0.5 text-xs font-semibold text-[#4a1515]">
             Driving routes (cars) · pick one · est. fare (USD)
           </p>
           <p className="px-1 pb-2 text-[10px] leading-snug opacity-80">
@@ -569,10 +661,10 @@ export default function RiderPage({
                 title={option.roadsLine || option.summaryLine || option.name}
                 className={`flex w-full flex-col gap-1 rounded-lg px-3 py-2.5 text-left text-xs transition ${
                   selectedRouteIndex === index
-                    ? 'bg-[#9d3733] text-[#f2e3bb]'
+                    ? 'bg-[#4a1515] text-white shadow-md'
                     : darkMode
                       ? 'hover:bg-[#9d3733]/20'
-                      : 'hover:bg-[#9d3733]/10'
+                      : 'hover:bg-[#FFFCF9]'
                 }`}
               >
                 <div className="flex w-full items-start gap-2">
@@ -584,8 +676,8 @@ export default function RiderPage({
                       <span
                         className={`mb-1 block text-sm font-bold ${
                           selectedRouteIndex === index
-                            ? 'text-[#f2e3bb]'
-                            : 'text-[#9d3733]'
+                            ? 'text-white'
+                            : 'text-[#4a1515]'
                         }`}
                       >
                         {formatUsd(option.priceUsd)}
@@ -602,7 +694,7 @@ export default function RiderPage({
                 {option.roadsLine ? (
                   <p
                     className={`w-full pl-0 text-[10px] leading-relaxed opacity-90 ${
-                      selectedRouteIndex === index ? 'text-[#f2e3bb]/95' : ''
+                      selectedRouteIndex === index ? 'text-white/95' : ''
                     }`}
                   >
                     <span className="font-bold opacity-100">Streets: </span>
@@ -618,7 +710,7 @@ export default function RiderPage({
       <button
         type="submit"
         disabled={riderBusy || !authToken}
-        className="font-accent w-full rounded-xl bg-[#9d3733] px-4 py-3.5 text-base font-bold text-[#f2e3bb] shadow-lg shadow-[#9d3733]/25 transition hover:bg-[#842f2b] disabled:opacity-60 xl:py-2.5 xl:text-sm"
+        className="font-accent w-full rounded-xl bg-[#4a1515] px-4 py-3.5 text-base font-bold text-white shadow-lg shadow-[#4a1515]/20 transition hover:bg-[#3d1212] disabled:opacity-60 xl:py-2.5 xl:text-sm"
       >
         {riderBusy ? 'Working…' : 'Request ride'}
       </button>
@@ -632,35 +724,39 @@ export default function RiderPage({
     const submittedStars = ratingStarsDraft
     const driverName = activeRide.driver?.name ?? null
     try {
+      setHideRideOverlayAfterRating(true)
       const ratedRide = await rateRide(authToken, activeRide.id, submittedStars)
-      const r = ratedRide?.rating
-      setRatingThanks({
-        stars: submittedStars,
-        driverName,
-        ratedAt: r?.createdAt ?? null,
-      })
+      const ratedId = String(activeRide.id)
+      suppressActiveRideOverlayForRideIdRef.current = ratedId
+      ratedRideIdsRef.current.add(ratedId)
+      persistRatedRideIds(ratedRideIdsRef.current)
+      if (ratedRide && typeof setActiveRide === 'function') {
+        setActiveRide(ratedRide)
+      }
+      const thanks = `Thanks! You rated ${driverName ?? 'your driver'} with ${submittedStars}★.`
+      setToastNotification(thanks)
+      window.setTimeout(() => setToastNotification((msg) => (msg === thanks ? '' : msg)), 4500)
       await fetchRiderData()
     } catch (e) {
+      suppressActiveRideOverlayForRideIdRef.current = null
+      setHideRideOverlayAfterRating(false)
       setRiderMessage(e?.message || 'Could not save your rating.')
     } finally {
       setRatingBusy(false)
     }
   }
 
-  const driverStatusLabel = needsRiderRating
-    ? 'Trip complete · rate your driver'
-    : activeRide
+  const driverStatusLabel =
+    activeRide && !isCompletedRatedTrip
       ? `On trip · ${activeRide.status}`
-      : isDriverMapView
-        ? 'Driver view · full map, then book'
-        : 'Classic view · map + form side by side (desktop)'
+      : 'Driver view · full map, then book'
 
   const renderRatingCard = () => (
     <div
-      className={`w-full max-w-[min(100%,22rem)] rounded-2xl border px-4 py-3 shadow-xl backdrop-blur-md ${
+      className={`w-full max-w-[min(100%,22rem)] rounded-2xl border px-4 py-3 shadow-[0_8px_40px_-16px_rgba(45,16,16,0.15)] backdrop-blur-md ${
         darkMode
           ? 'border-[#9d3733]/50 bg-black/80 text-[#f2e3bb]'
-          : 'border-[#9d3733]/35 bg-white/95 text-[#2d100f]'
+          : 'border-[#e8dfd6] bg-white text-[#2d100f]'
       }`}
       role="region"
       aria-label="Rate your driver"
@@ -689,22 +785,71 @@ export default function RiderPage({
         type="button"
         disabled={ratingBusy || ratingStarsDraft < 1}
         onClick={handleSubmitDriverRating}
-        className="font-accent mt-3 w-full rounded-xl bg-[#9d3733] py-2.5 text-sm font-bold text-[#f2e3bb] transition hover:bg-[#842f2b] disabled:opacity-50"
+        className="font-accent mt-3 w-full rounded-xl bg-[#4a1515] py-2.5 text-sm font-bold text-white transition hover:bg-[#3d1212] disabled:opacity-50"
       >
         {ratingBusy ? 'Saving…' : 'Submit rating'}
       </button>
     </div>
   )
 
+  const rideHistoryTotalPages =
+    rideHistory.length > 0
+      ? Math.max(1, Math.ceil(rideHistory.length / RIDES_HISTORY_PAGE_SIZE))
+      : 1
+  const rideHistoryPageIndex = Math.min(rideHistoryPage, rideHistoryTotalPages - 1)
+
+  const recentRideHistorySection = (
+    <div
+      className={`border-b pb-5 mb-5 ${
+        darkMode ? 'border-[#9d3733]/30' : 'border-[#e8dfd6]'
+      }`}
+    >
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <h2 className="font-accent text-xl font-bold">Recent Ride History</h2>
+        {rideHistory.length > 0 ? (
+          <span
+            className={`rounded-full px-2.5 py-0.5 text-[11px] font-bold ${
+              darkMode ? 'bg-[#9d3733]/25 text-[#f2e3bb]' : 'bg-[#4a1515]/10 text-[#4a1515]'
+            }`}
+          >
+            {rideHistory.length} {rideHistory.length === 1 ? 'ride' : 'rides'}
+          </span>
+        ) : null}
+      </div>
+      {rideHistory.length === 0 ? (
+        <p className="mt-3 text-sm opacity-80">No rides found yet.</p>
+      ) : (
+        <button
+          type="button"
+          onClick={() => {
+            setRideHistoryPage(0)
+            setRideHistoryModalOpen(true)
+          }}
+          className={`mt-4 flex w-full items-center justify-between gap-3 rounded-xl border px-4 py-3 text-left transition ${
+            darkMode
+              ? 'border-[#9d3733]/35 bg-black/40 hover:bg-[#9d3733]/15'
+              : 'border-[#e8dfd6] bg-[#FFFCF9] hover:bg-[#ede8e0]'
+          }`}
+        >
+          <span className="text-sm font-semibold">View ride history</span>
+          <span className="text-lg opacity-70" aria-hidden>
+            →
+          </span>
+        </button>
+      )}
+    </div>
+  )
+
   return (
-    <section className="mx-auto w-full max-w-[1700px] px-4 pb-14 pt-24 sm:px-6 md:pt-28">
+    <div className="min-h-screen w-full bg-[#F5EFE6]">
+    <section className="mx-auto w-full max-w-[1700px] px-4 pb-14 pt-24 text-[#2d100f] sm:px-6 md:pt-28">
       {toastNotification && (
         <div className="pointer-events-none fixed right-4 top-24 z-[140] max-w-sm">
           <div
-            className={`pointer-events-auto rounded-xl border px-4 py-3 text-sm font-semibold shadow-xl ${
+            className={`pointer-events-auto rounded-xl border px-4 py-3 text-sm font-semibold shadow-[0_8px_32px_-12px_rgba(45,16,16,0.18)] ${
               darkMode
                 ? 'border-[#9d3733]/55 bg-black/85 text-[#f2e3bb]'
-                : 'border-[#9d3733]/35 bg-white text-[#2d100f]'
+                : 'border-[#e8dfd6] bg-white text-[#2d100f]'
             }`}
           >
             <div className="flex items-start justify-between gap-3">
@@ -712,7 +857,7 @@ export default function RiderPage({
               <button
                 type="button"
                 onClick={() => setToastNotification('')}
-                className="rounded p-1 text-xs opacity-80 transition hover:bg-[#9d3733]/15 hover:opacity-100"
+                className="rounded p-1 text-xs opacity-80 transition hover:bg-[#4a1515]/10 hover:opacity-100"
                 aria-label="Dismiss notification"
               >
                 ×
@@ -721,56 +866,11 @@ export default function RiderPage({
           </div>
         </div>
       )}
-      {ratingThanks && (
-        <div
-          className="fixed inset-0 z-[160] flex items-center justify-center p-4"
-          role="presentation"
-          onMouseDown={(e) => {
-            if (e.target === e.currentTarget) setRatingThanks(null)
-          }}
-        >
-          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" aria-hidden />
-          <div
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="rating-thanks-title"
-            className={`relative z-10 w-full max-w-md rounded-2xl border px-6 py-8 text-center shadow-2xl ${
-              darkMode
-                ? 'border-[#9d3733]/50 bg-[#111] text-[#f2e3bb]'
-                : 'border-[#9d3733]/35 bg-[#fff8eb] text-[#2d100f]'
-            }`}
-          >
-            <p className="font-accent text-2xl font-bold text-[#9d3733]" id="rating-thanks-title">
-              Congratulations!
-            </p>
-            <p className="mt-4 text-base leading-relaxed">
-              Thank you for working with us — we are glad you chose JOT for your trip.
-            </p>
-            <p className="mt-3 text-sm opacity-90">
-              You rated{' '}
-              <span className="font-semibold">{ratingThanks.driverName ?? 'your driver'}</span> with{' '}
-              <span className="font-semibold text-amber-400">{ratingThanks.stars}★</span>.
-            </p>
-            {ratingThanks.ratedAt && (
-              <p className="mt-4 text-xs opacity-75">
-                Trip rating saved · {new Date(ratingThanks.ratedAt).toLocaleString()}
-              </p>
-            )}
-            <button
-              type="button"
-              className="font-accent mt-6 w-full rounded-xl bg-[#9d3733] py-3 text-base font-bold text-[#f2e3bb] transition hover:bg-[#842f2b]"
-              onClick={() => setRatingThanks(null)}
-            >
-              Continue
-            </button>
-          </div>
-        </div>
-      )}
       <div
-        className={`px-0 pt-0 pb-0 xl:rounded-2xl xl:border xl:p-8 ${
+        className={`px-0 pt-0 pb-0 xl:rounded-3xl xl:border xl:p-8 ${
           darkMode
             ? 'xl:border-[#9d3733]/40 xl:bg-[#0f0f0f]'
-            : 'xl:border-[#9d3733]/30 xl:bg-[#fff8eb]'
+            : 'xl:border-[#e8dfd6] xl:bg-white xl:shadow-[0_4px_40px_-14px_rgba(45,16,16,0.08)]'
         }`}
       >
         <div className="mb-4 flex flex-col gap-3 px-0 xl:mb-6 xl:px-0">
@@ -785,117 +885,140 @@ export default function RiderPage({
             <button
               type="button"
               onClick={() => navigateToPage('home')}
-              className="shrink-0 rounded-lg border border-[#9d3733]/50 px-3 py-2 text-xs font-bold text-[#9d3733] transition hover:bg-[#9d3733]/10 xl:px-4 xl:text-sm"
+              className="shrink-0 rounded-lg border border-[#4a1515]/35 px-3 py-2 text-xs font-bold text-[#4a1515] transition hover:bg-[#4a1515]/10 xl:px-4 xl:text-sm"
             >
               Home
             </button>
           </div>
-          {authUser && (
-            <div className="flex flex-wrap items-center gap-2">
-              <span
-                className={`text-[11px] font-semibold uppercase tracking-wide ${
-                  darkMode ? 'text-[#f2e3bb]/55' : 'text-[#4b2220]/65'
-                }`}
-              >
-                Map layout
-              </span>
-              <div
-                className={`inline-flex rounded-xl border p-0.5 ${
-                  darkMode ? 'border-[#9d3733]/40 bg-[#111]' : 'border-[#9d3733]/30 bg-[#fffdf6]'
-                }`}
-                role="group"
-                aria-label="Map layout"
-              >
-                <button
-                  type="button"
-                  onClick={() => setMapViewMode('driver')}
-                  className={`rounded-lg px-3 py-1.5 text-xs font-bold transition sm:px-4 sm:text-sm ${
-                    isDriverMapView
-                      ? 'bg-[#9d3733] text-[#f2e3bb] shadow-sm'
-                      : darkMode
-                        ? 'text-[#f2e3bb]/80 hover:bg-[#9d3733]/15'
-                        : 'text-[#2d100f] hover:bg-[#9d3733]/10'
-                  }`}
-                >
-                  Driver
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setMapViewMode('classic')}
-                  className={`rounded-lg px-3 py-1.5 text-xs font-bold transition sm:px-4 sm:text-sm ${
-                    !isDriverMapView
-                      ? 'bg-[#9d3733] text-[#f2e3bb] shadow-sm'
-                      : darkMode
-                        ? 'text-[#f2e3bb]/80 hover:bg-[#9d3733]/15'
-                        : 'text-[#2d100f] hover:bg-[#9d3733]/10'
-                  }`}
-                >
-                  Classic
-                </button>
-              </div>
-            </div>
-          )}
         </div>
 
         {!authUser ? (
-          <p className="text-sm text-[#9d3733] xl:px-0">Please sign in to view your rides.</p>
+          <p className="text-sm font-medium text-[#4a1515] xl:px-0">Please sign in to view your rides.</p>
         ) : (
           <div className="space-y-6 pb-24 xl:pb-0">
             <div className="grid gap-6 xl:grid-cols-[380px_minmax(0,1fr)]">
-              <form
-                onSubmit={handleBookingFormSubmit}
-                className={`hidden rounded-2xl border p-5 shadow-sm xl:block ${
-                  darkMode ? 'border-[#9d3733]/40 bg-[#111]' : 'border-[#9d3733]/30 bg-[#fffdf6]'
+              <div
+                className={`hidden rounded-2xl border p-5 shadow-[0_4px_32px_-14px_rgba(45,16,16,0.08)] xl:block ${
+                  darkMode ? 'border-[#9d3733]/40 bg-[#111]' : 'border-[#e8dfd6] bg-white'
                 }`}
               >
+                {recentRideHistorySection}
                 <h2 className="font-accent mb-4 text-xl font-bold">Book your ride</h2>
-                {bookRideFields}
-              </form>
+                <form onSubmit={handleBookingFormSubmit}>{bookRideFields}</form>
+              </div>
 
               <div
-                className={`relative overflow-hidden shadow-sm ${
+                className={`relative overflow-hidden shadow-[0_4px_32px_-14px_rgba(45,16,16,0.08)] ${
                   isDriverMapView
                     ? `xl:rounded-2xl xl:border ${
                         darkMode
                           ? 'xl:border-[#9d3733]/40 xl:bg-[#111]'
-                          : 'xl:border-[#9d3733]/30 xl:bg-[#fffdf6]'
+                          : 'xl:border-[#e8dfd6] xl:bg-white'
                       } -mx-4 w-[calc(100%+2rem)] sm:-mx-6 sm:w-[calc(100%+3rem)] xl:mx-0 xl:w-full`
                     : `rounded-2xl border ${
-                        darkMode ? 'border-[#9d3733]/40 bg-[#111]' : 'border-[#9d3733]/30 bg-[#fffdf6]'
+                        darkMode ? 'border-[#9d3733]/40 bg-[#111]' : 'border-[#e8dfd6] bg-white'
                       } w-full`
                 }`}
               >
-                <div className="pointer-events-none absolute inset-x-0 top-0 z-20 flex flex-col items-center gap-2 px-3 pt-3 xl:pt-4">
-                  <div
-                    className={`pointer-events-auto max-w-[min(100%,28rem)] truncate rounded-2xl border px-4 py-2.5 text-center text-xs font-semibold shadow-lg backdrop-blur-md sm:text-sm ${
-                      darkMode
-                        ? 'border-[#9d3733]/45 bg-black/75 text-[#f2e3bb]'
-                        : 'border-[#9d3733]/30 bg-white/90 text-[#2d100f]'
-                    }`}
-                  >
-                    {driverStatusLabel}
-                  </div>
-                  {mapboxAccessToken && !mapWebGlError ? (
-                    <MapViewControls
-                      darkMode={darkMode}
-                      basemapMode={riderBasemapMode}
-                      onBasemapModeChange={setRiderBasemapMode}
-                      trafficOn={riderTrafficOn}
-                      onTrafficToggle={setRiderTrafficOn}
-                      onStreetView={onOpenStreetView}
-                      disabled={!authUser}
-                      className="pointer-events-auto w-full max-w-[min(100%,36rem)] px-0"
-                    />
+                <div className="pointer-events-none absolute inset-x-0 top-0 z-20 flex max-h-[85%] flex-col items-center gap-2 overflow-y-auto px-3 pb-4 pt-3 xl:max-h-[90%] xl:pt-4">
+                  {!activeRide || isCompletedRatedTrip ? (
+                    <div
+                      className={`pointer-events-auto max-w-[min(100%,28rem)] shrink-0 truncate rounded-2xl border px-4 py-2.5 text-center text-xs font-semibold shadow-lg backdrop-blur-md sm:text-sm ${
+                        darkMode
+                          ? 'border-[#9d3733]/45 bg-black/75 text-[#f2e3bb]'
+                          : 'border-[#e8dfd6] bg-white/95 text-[#2d100f]'
+                      }`}
+                    >
+                      {driverStatusLabel}
+                    </div>
                   ) : null}
-                  {needsRiderRating ? (
-                    <div className="pointer-events-auto flex w-full max-w-[min(100%,22rem)] justify-center xl:hidden">
-                      {renderRatingCard()}
+                  {showActiveRideMapOverlay ? (
+                    <div
+                      className={`pointer-events-auto w-full max-w-[min(100%,24rem)] shrink-0 rounded-2xl border p-4 text-sm shadow-[0_8px_32px_-12px_rgba(45,16,16,0.2)] backdrop-blur-md ${
+                        darkMode ? 'border-[#9d3733]/40 bg-black/80 text-[#f2e3bb]' : 'border-[#e8dfd6] bg-white/95 text-[#2d100f]'
+                      }`}
+                    >
+                      <div className="mb-3 flex items-center justify-between gap-2">
+                        <h2 className="font-accent text-lg font-bold leading-tight">Active Ride</h2>
+                        <button
+                          type="button"
+                          onClick={fetchRiderData}
+                          disabled={riderBusy}
+                          className="shrink-0 rounded-lg border border-[#4a1515]/35 px-2.5 py-1 text-[11px] font-bold text-[#4a1515] transition hover:bg-[#4a1515]/10 disabled:opacity-60 dark:border-[#f2e3bb]/30 dark:text-[#f2e3bb] dark:hover:bg-white/10"
+                        >
+                          Refresh
+                        </button>
+                      </div>
+                      {riderBusy && !activeRide ? (
+                        <p className="text-sm opacity-80">Loading rider details...</p>
+                      ) : activeRide ? (
+                        activeRide.status === 'COMPLETED' && needsRiderRating ? (
+                          <div className="space-y-3">
+                            <p className="font-semibold leading-snug">
+                              Trip finished. Please rate your driver before booking your next ride.
+                            </p>
+                            <p>
+                              <span className="font-bold">Driver:</span> {activeRide.driver?.name ?? '—'}
+                            </p>
+                            <p>
+                              <span className="font-bold">Route:</span> {activeRide.pickupAddress} →{' '}
+                              {activeRide.dropoffAddress}
+                            </p>
+                            {typeof activeRide.fareFinal === 'number' && (
+                              <p>
+                                <span className="font-bold">Fare:</span> {formatUsd(activeRide.fareFinal)}
+                              </p>
+                            )}
+                            {renderRatingCard()}
+                          </div>
+                        ) : activeRide.status === 'COMPLETED' ? (
+                          <div className="space-y-2">
+                            <p className="font-semibold leading-snug">Trip completed</p>
+                            <p className="text-xs opacity-80">You can book your next ride from the form.</p>
+                          </div>
+                        ) : (
+                          <div className="space-y-2">
+                            <p>
+                              <span className="font-bold">Status:</span> {activeRide.status}
+                            </p>
+                            <p>
+                              <span className="font-bold">From:</span> {activeRide.pickupAddress}
+                            </p>
+                            <p>
+                              <span className="font-bold">To:</span> {activeRide.dropoffAddress}
+                            </p>
+                            <p>
+                              <span className="font-bold">Fare estimate:</span>{' '}
+                              {typeof activeRide.fareEstimate === 'number'
+                                ? formatUsd(activeRide.fareEstimate)
+                                : (activeRide.fareEstimate ?? 'N/A')}
+                            </p>
+                            {activeRide.paymentMethod != null && (
+                              <p>
+                                <span className="font-bold">Payment:</span>{' '}
+                                {activeRide.paymentMethod === 'CARD'
+                                  ? 'Card / digital wallet'
+                                  : 'Cash on pickup'}{' '}
+                                <span className="opacity-75">({activeRide.paymentStatus})</span>
+                              </p>
+                            )}
+                            <button
+                              type="button"
+                              onClick={handleCancelRide}
+                              disabled={riderBusy}
+                              className="mt-2 w-full rounded-lg bg-[#4a1515] px-4 py-2 text-sm font-bold text-white transition hover:bg-[#3d1212] disabled:opacity-60"
+                            >
+                              Cancel active ride
+                            </button>
+                          </div>
+                        )
+                      ) : null}
                     </div>
                   ) : null}
                 </div>
                 {mapWebGlError ? (
                   <div
-                    className={`flex items-center justify-center px-6 pb-6 pt-14 text-center text-sm leading-relaxed text-[#9d3733] xl:pb-0 xl:pt-0 ${
+                    className={`flex items-center justify-center px-6 pb-6 pt-14 text-center text-sm leading-relaxed text-[#5a4540] xl:pb-0 xl:pt-0 ${
                       isDriverMapView
                         ? 'h-[calc(100dvh-7.5rem)] min-h-[280px] xl:h-[min(760px,calc(100vh-8rem))] xl:min-h-[560px]'
                         : 'h-[min(68dvh,520px)] min-h-[260px] xl:h-[760px] xl:min-h-[560px]'
@@ -905,7 +1028,7 @@ export default function RiderPage({
                   </div>
                 ) : !mapboxAccessToken ? (
                   <div
-                    className={`flex items-center justify-center px-6 pb-6 pt-14 text-center text-sm text-[#9d3733] xl:pb-0 xl:pt-0 ${
+                    className={`flex items-center justify-center px-6 pb-6 pt-14 text-center text-sm text-[#5a4540] xl:pb-0 xl:pt-0 ${
                       isDriverMapView
                         ? 'h-[calc(100dvh-7.5rem)] min-h-[280px] xl:h-[min(760px,calc(100vh-8rem))] xl:min-h-[560px]'
                         : 'h-[min(68dvh,520px)] min-h-[260px] xl:h-[760px] xl:min-h-[560px]'
@@ -933,7 +1056,7 @@ export default function RiderPage({
                 className={`fixed bottom-5 left-4 right-4 z-40 flex items-center justify-center gap-2 rounded-2xl py-4 text-base font-bold shadow-xl transition active:scale-[0.98] xl:hidden ${
                   darkMode
                     ? 'bg-[#9d3733] text-[#f2e3bb] shadow-black/40'
-                    : 'bg-[#9d3733] text-[#f2e3bb] shadow-[#9d3733]/30'
+                    : 'bg-[#4a1515] text-white shadow-[#4a1515]/25'
                 }`}
               >
                 <span>Book your ride</span>
@@ -960,14 +1083,14 @@ export default function RiderPage({
                   className={`max-h-[min(92dvh,900px)] overflow-y-auto rounded-t-3xl shadow-2xl ${
                     darkMode
                       ? 'border-t border-[#9d3733]/40 bg-[#0a0a0a]'
-                      : 'border-t border-[#9d3733]/25 bg-[#fff8eb]'
+                      : 'border-t border-[#e8dfd6] bg-[#FFFCF9]'
                   }`}
                   style={{ paddingBottom: 'max(1.25rem, env(safe-area-inset-bottom))' }}
                 >
                   <div className="flex justify-center pt-3">
-                    <span className="h-1 w-12 rounded-full bg-[#9d3733]/35" aria-hidden />
+                    <span className="h-1 w-12 rounded-full bg-[#e8dfd6]" aria-hidden />
                   </div>
-                  <div className="flex items-start justify-between gap-3 border-b border-[#9d3733]/15 px-5 pb-4 pt-3">
+                  <div className="flex items-start justify-between gap-3 border-b border-[#e8dfd6] px-5 pb-4 pt-3">
                     <h2
                       id="book-ride-sheet-title"
                       className={`font-accent text-xl font-bold leading-tight ${darkMode ? 'text-white' : 'text-[#2d100f]'}`}
@@ -980,13 +1103,14 @@ export default function RiderPage({
                       className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-2xl leading-none transition ${
                         darkMode
                           ? 'bg-[#1a1a1a] text-[#f2e3bb] hover:bg-[#252525]'
-                          : 'bg-white text-[#2d100f] shadow-sm hover:bg-[#fffdf6]'
+                          : 'bg-white text-[#2d100f] shadow-sm hover:bg-[#FFFCF9]'
                       }`}
                       aria-label="Close"
                     >
                       ×
                     </button>
                   </div>
+                  <div className="px-5 pt-1">{recentRideHistorySection}</div>
                   <form onSubmit={handleBookingFormSubmit} className="px-5 pb-6 pt-4">
                     {bookRideFields}
                   </form>
@@ -994,130 +1118,7 @@ export default function RiderPage({
               </div>
             )}
 
-            <div
-              className={`rounded-xl border p-5 ${
-                darkMode ? 'border-[#9d3733]/40 bg-[#111]' : 'border-[#9d3733]/30 bg-[#fffdf6]'
-              }`}
-            >
-              <div className="mb-3 flex items-center justify-between">
-                <h2 className="font-accent text-xl font-bold">Active Ride</h2>
-                <button
-                  type="button"
-                  onClick={fetchRiderData}
-                  disabled={riderBusy}
-                  className="rounded-lg border border-[#9d3733]/50 px-3 py-1 text-xs font-bold text-[#9d3733] transition hover:bg-[#9d3733]/10 disabled:opacity-60"
-                >
-                  Refresh
-                </button>
-              </div>
-
-              {riderBusy ? (
-                <p className="text-sm opacity-80">Loading rider details...</p>
-              ) : activeRide ? (
-                needsRiderRating ? (
-                  <div className="space-y-3 text-sm">
-                    <p className="font-semibold leading-snug">
-                      Trip finished. Please rate your driver before booking your next ride.
-                    </p>
-                    <p>
-                      <span className="font-bold">Driver:</span> {activeRide.driver?.name ?? '—'}
-                    </p>
-                    <p>
-                      <span className="font-bold">Route:</span> {activeRide.pickupAddress} →{' '}
-                      {activeRide.dropoffAddress}
-                    </p>
-                    {typeof activeRide.fareFinal === 'number' && (
-                      <p>
-                        <span className="font-bold">Fare:</span> {formatUsd(activeRide.fareFinal)}
-                      </p>
-                    )}
-                    <div className="hidden xl:block">{renderRatingCard()}</div>
-                    <p className="text-xs opacity-80 xl:hidden">
-                      Use the star rating on the map above to rate your driver.
-                    </p>
-                  </div>
-                ) : (
-                  <div className="space-y-2 text-sm">
-                    <p>
-                      <span className="font-bold">Status:</span> {activeRide.status}
-                    </p>
-                    <p>
-                      <span className="font-bold">From:</span> {activeRide.pickupAddress}
-                    </p>
-                    <p>
-                      <span className="font-bold">To:</span> {activeRide.dropoffAddress}
-                    </p>
-                    <p>
-                      <span className="font-bold">Fare estimate:</span>{' '}
-                      {typeof activeRide.fareEstimate === 'number'
-                        ? formatUsd(activeRide.fareEstimate)
-                        : (activeRide.fareEstimate ?? 'N/A')}
-                    </p>
-                    {activeRide.paymentMethod != null && (
-                      <p>
-                        <span className="font-bold">Payment:</span>{' '}
-                        {activeRide.paymentMethod === 'CARD' ? 'Card / digital wallet' : 'Cash on pickup'}{' '}
-                        <span className="opacity-75">({activeRide.paymentStatus})</span>
-                      </p>
-                    )}
-                    <button
-                      type="button"
-                      onClick={handleCancelRide}
-                      disabled={riderBusy}
-                      className="mt-2 rounded-lg bg-[#9d3733] px-4 py-2 text-sm font-bold text-[#f2e3bb] transition hover:bg-[#842f2b] disabled:opacity-60"
-                    >
-                      Cancel active ride
-                    </button>
-                  </div>
-                )
-              ) : (
-                <p className="text-sm opacity-80">No active ride right now.</p>
-              )}
-            </div>
-
-            <div
-              className={`rounded-xl border p-5 ${
-                darkMode ? 'border-[#9d3733]/40 bg-[#111]' : 'border-[#9d3733]/30 bg-[#fffdf6]'
-              }`}
-            >
-              <h2 className="font-accent mb-3 text-xl font-bold">Recent Ride History</h2>
-              {rideHistory.length === 0 ? (
-                <p className="text-sm opacity-80">No rides found yet.</p>
-              ) : (
-                <div className="space-y-3">
-                  {rideHistory.slice(0, 6).map((ride) => (
-                    <article
-                      key={ride.id}
-                      className={`rounded-lg border p-3 text-sm ${
-                        darkMode ? 'border-[#9d3733]/35 bg-black/40' : 'border-[#9d3733]/25 bg-white'
-                      }`}
-                    >
-                      <p>
-                        <span className="font-bold">Status:</span> {ride.status}
-                      </p>
-                      <p>
-                        <span className="font-bold">From:</span> {ride.pickupAddress}
-                      </p>
-                      <p>
-                        <span className="font-bold">To:</span> {ride.dropoffAddress}
-                      </p>
-                      {ride.rating && typeof ride.rating.stars === 'number' && (
-                        <p>
-                          <span className="font-bold">Your rating:</span> {ride.rating.stars}★
-                          {ride.rating.createdAt && (
-                            <span className="ml-1 text-[11px] font-normal opacity-75">
-                              · {new Date(ride.rating.createdAt).toLocaleString()}
-                            </span>
-                          )}
-                        </p>
-                      )}
-                    </article>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            {riderMessage && <p className="text-sm text-[#9d3733]">{riderMessage}</p>}
+            {riderMessage && <p className="text-sm font-medium text-[#4a1515]">{riderMessage}</p>}
           </div>
         )}
       </div>
@@ -1138,13 +1139,13 @@ export default function RiderPage({
             role="dialog"
             aria-modal="true"
             aria-labelledby="pay-ride-title"
-            className={`relative z-10 w-full max-w-lg overflow-hidden rounded-2xl border shadow-2xl ${
+            className={`relative z-10 w-full max-w-lg overflow-hidden rounded-2xl border shadow-[0_20px_60px_-24px_rgba(45,16,16,0.22)] ${
               darkMode
                 ? 'border-[#9d3733]/45 bg-[#111] text-[#f2e3bb]'
-                : 'border-[#9d3733]/35 bg-[#fff8eb] text-[#2d100f]'
+                : 'border-[#e8dfd6] bg-[#FFFCF9] text-[#2d100f]'
             }`}
           >
-            <div className="flex items-start justify-between gap-3 border-b border-[#9d3733]/20 px-5 py-4">
+            <div className="flex items-start justify-between gap-3 border-b border-[#e8dfd6] px-5 py-4">
               <div>
                 <h2 id="pay-ride-title" className="font-brand text-xl font-bold">
                   {payView === 'stripe' ? 'Card details' : 'Payment'}
@@ -1162,7 +1163,7 @@ export default function RiderPage({
                   setPaymentModalOpen(false)
                   resetPaymentModal()
                 }}
-                className="rounded-lg p-1.5 text-lg leading-none opacity-70 transition hover:bg-[#9d3733]/15 hover:opacity-100 disabled:opacity-40"
+                className="rounded-lg p-1.5 text-lg leading-none opacity-70 transition hover:bg-[#4a1515]/10 hover:opacity-100 disabled:opacity-40"
                 aria-label="Close"
               >
                 ×
@@ -1186,20 +1187,20 @@ export default function RiderPage({
                           onClick={() => setSelectedDriverId(driver.userId)}
                           className={`w-full rounded-xl border px-3 py-2.5 text-left transition ${
                             selected
-                              ? 'border-[#9d3733] bg-[#9d3733]/15'
+                              ? 'border-[#4a1515] bg-[#4a1515]/10'
                               : darkMode
                                 ? 'border-[#9d3733]/30 hover:bg-[#9d3733]/10'
-                                : 'border-[#9d3733]/20 hover:bg-[#9d3733]/10'
+                                : 'border-[#e8dfd6] hover:bg-[#FFFCF9]'
                           }`}
                         >
                           <div className="flex items-start gap-3">
                             <div
                               className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-full border text-sm font-bold ${
                                 selected
-                                  ? 'border-[#9d3733] bg-[#9d3733]/20 text-[#9d3733]'
+                                  ? 'border-[#4a1515] bg-[#4a1515]/15 text-[#4a1515]'
                                   : darkMode
                                     ? 'border-[#9d3733]/35 bg-black text-[#f2e3bb]'
-                                    : 'border-[#9d3733]/25 bg-white text-[#842f2b]'
+                                    : 'border-[#e8dfd6] bg-white text-[#4a1515]'
                               }`}
                             >
                               {initials}
@@ -1212,7 +1213,7 @@ export default function RiderPage({
                                   className={`shrink-0 rounded-full border px-2 py-0.5 text-[11px] font-bold ${
                                     darkMode
                                       ? 'border-[#f2e3bb]/25 bg-[#1a1a1a] text-[#f2e3bb]'
-                                      : 'border-[#9d3733]/25 bg-white text-[#2d100f]'
+                                      : 'border-[#e8dfd6] bg-[#FFFCF9] text-[#2d100f]'
                                   }`}
                                 >
                                   ★ {rating}
@@ -1223,7 +1224,7 @@ export default function RiderPage({
                                 {driver.licensePlate}
                               </p>
                               <div className="mt-2 flex flex-wrap gap-1.5">
-                                <span className="rounded-full bg-[#9d3733]/15 px-2 py-0.5 text-[11px] font-semibold text-[#9d3733]">
+                                <span className="rounded-full bg-[#4a1515]/12 px-2 py-0.5 text-[11px] font-semibold text-[#4a1515]">
                                   ETA {etaMinutes} min
                                 </span>
                                 <span
@@ -1284,7 +1285,7 @@ export default function RiderPage({
                         setPayBusy(false)
                       }
                     }}
-                    className="w-full rounded-xl bg-[#9d3733] py-3 text-sm font-bold text-[#f2e3bb] transition hover:bg-[#842f2b] disabled:opacity-60"
+                    className="w-full rounded-xl bg-[#4a1515] py-3 text-sm font-bold text-white transition hover:bg-[#3d1212] disabled:opacity-60"
                   >
                     Request this driver
                   </button>
@@ -1293,10 +1294,10 @@ export default function RiderPage({
                 <>
                   <div
                     className={`rounded-xl border px-3 py-3 text-xs ${
-                      darkMode ? 'border-[#9d3733]/35 bg-black/40' : 'border-[#9d3733]/25 bg-white'
+                      darkMode ? 'border-[#9d3733]/35 bg-black/40' : 'border-[#e8dfd6] bg-white'
                     }`}
                   >
-                    <p className="font-semibold text-[#9d3733]">Waiting for driver acceptance</p>
+                    <p className="font-semibold text-[#4a1515]">Waiting for driver acceptance</p>
                     <p className="mt-1 text-sm">{realtimeStatusLine}</p>
                     <p className="mt-1 text-sm">
                       Driver has up to 2 minutes to accept your ride.
@@ -1322,7 +1323,7 @@ export default function RiderPage({
                     className={`w-full rounded-xl border-2 py-3 text-sm font-bold transition ${
                       darkMode
                         ? 'border-[#9d3733]/60 text-[#f2e3bb] hover:bg-[#9d3733]/15'
-                        : 'border-[#9d3733]/50 text-[#842f2b] hover:bg-[#9d3733]/10'
+                        : 'border-[#4a1515]/40 text-[#4a1515] hover:bg-[#4a1515]/10'
                     }`}
                   >
                     Cancel and choose another driver
@@ -1332,11 +1333,11 @@ export default function RiderPage({
                 <>
                   <div
                     className={`rounded-xl border px-3 py-2 text-xs ${
-                      darkMode ? 'border-[#9d3733]/35 bg-black/40' : 'border-[#9d3733]/25 bg-white'
+                      darkMode ? 'border-[#9d3733]/35 bg-black/40' : 'border-[#e8dfd6] bg-white'
                     }`}
                   >
                     <p className="opacity-80">Estimated total</p>
-                    <p className="font-brand text-lg font-bold text-[#9d3733]">
+                    <p className="font-brand text-lg font-bold text-[#4a1515]">
                       {formatUsd(paymentFareUsd) ?? '—'}
                     </p>
                     <p className="mt-1 text-[11px] opacity-70">
@@ -1344,14 +1345,14 @@ export default function RiderPage({
                       at pickup.
                     </p>
                     {selectedDriver ? (
-                      <p className="mt-2 text-[11px] font-semibold text-[#9d3733]">
+                      <p className="mt-2 text-[11px] font-semibold text-[#4a1515]">
                         Driver: {selectedDriver.name} ({selectedDriver.vehicleMake}{' '}
                         {selectedDriver.vehicleModel})
                       </p>
                     ) : null}
                   </div>
                   {payError && (
-                    <p className="rounded-lg border border-[#9d3733]/40 bg-[#9d3733]/10 px-3 py-2 text-sm text-[#9d3733]">
+                    <p className="rounded-lg border border-[#e8dfd6] bg-[#fff5f5] px-3 py-2 text-sm text-[#842f2b]">
                       {payError}
                     </p>
                   )}
@@ -1359,7 +1360,7 @@ export default function RiderPage({
                     type="button"
                     disabled={payBusy || riderBusy}
                     onClick={handleStartStripeCheckout}
-                    className="w-full rounded-xl bg-[#9d3733] py-3 text-sm font-bold text-[#f2e3bb] transition hover:bg-[#842f2b] disabled:opacity-60"
+                    className="w-full rounded-xl bg-[#4a1515] py-3 text-sm font-bold text-white transition hover:bg-[#3d1212] disabled:opacity-60"
                   >
                     {payBusy ? 'Starting checkout…' : 'Pay with credit or debit card'}
                   </button>
@@ -1370,7 +1371,7 @@ export default function RiderPage({
                     className={`w-full rounded-xl border-2 py-3 text-sm font-bold transition disabled:opacity-60 ${
                       darkMode
                         ? 'border-[#9d3733]/60 text-[#f2e3bb] hover:bg-[#9d3733]/15'
-                        : 'border-[#9d3733]/50 text-[#842f2b] hover:bg-[#9d3733]/10'
+                        : 'border-[#4a1515]/40 text-[#4a1515] hover:bg-[#4a1515]/10'
                     }`}
                   >
                     Cash on pickup
@@ -1379,7 +1380,7 @@ export default function RiderPage({
               ) : (
                 <>
                   {payError && (
-                    <p className="rounded-lg border border-[#9d3733]/40 bg-[#9d3733]/10 px-3 py-2 text-sm text-[#9d3733]">
+                    <p className="rounded-lg border border-[#e8dfd6] bg-[#fff5f5] px-3 py-2 text-sm text-[#842f2b]">
                       {payError}
                     </p>
                   )}
@@ -1391,7 +1392,7 @@ export default function RiderPage({
                       setStripeClientSecret(null)
                       setPayError('')
                     }}
-                    className="text-xs font-bold text-[#9d3733] underline decoration-[#9d3733]/40"
+                    className="text-xs font-bold text-[#4a1515] underline decoration-[#4a1515]/35"
                   >
                     ← Back to payment options
                   </button>
@@ -1409,6 +1410,108 @@ export default function RiderPage({
           </div>
         </div>
       )}
+
+      {rideHistoryModalOpen && rideHistory.length > 0 ? (
+        <div
+          className="fixed inset-0 z-[115] flex items-center justify-center p-4"
+          role="presentation"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) setRideHistoryModalOpen(false)
+          }}
+        >
+          <div className="absolute inset-0 bg-black/55 backdrop-blur-sm" aria-hidden />
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="ride-history-modal-title"
+            className={`relative z-10 flex max-h-[min(90dvh,720px)] w-full max-w-lg flex-col overflow-hidden rounded-2xl border shadow-[0_20px_60px_-24px_rgba(45,16,16,0.22)] ${
+              darkMode
+                ? 'border-[#9d3733]/45 bg-[#111] text-[#f2e3bb]'
+                : 'border-[#e8dfd6] bg-[#FFFCF9] text-[#2d100f]'
+            }`}
+          >
+            <div className="flex shrink-0 items-start justify-between gap-3 border-b border-[#e8dfd6] px-5 py-4 dark:border-[#9d3733]/30">
+              <div>
+                <h2 id="ride-history-modal-title" className="font-brand text-xl font-bold">
+                  Recent Ride History
+                </h2>
+                <p className="mt-1 text-xs opacity-80">
+                  {rideHistory.length} total · {RIDES_HISTORY_PAGE_SIZE} per page
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setRideHistoryModalOpen(false)}
+                className="rounded-lg p-1.5 text-lg leading-none opacity-70 transition hover:bg-[#4a1515]/10 hover:opacity-100 dark:hover:bg-[#9d3733]/20"
+                aria-label="Close"
+              >
+                ×
+              </button>
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+              <div className="space-y-3">
+                {rideHistory
+                  .slice(
+                    rideHistoryPageIndex * RIDES_HISTORY_PAGE_SIZE,
+                    rideHistoryPageIndex * RIDES_HISTORY_PAGE_SIZE + RIDES_HISTORY_PAGE_SIZE,
+                  )
+                  .map((ride) => (
+                    <article
+                      key={ride.id}
+                      className={`rounded-xl border p-3 text-sm ${
+                        darkMode ? 'border-[#9d3733]/35 bg-black/40' : 'border-[#e8dfd6] bg-white'
+                      }`}
+                    >
+                      <p>
+                        <span className="font-bold">Status:</span> {ride.status}
+                      </p>
+                      <p>
+                        <span className="font-bold">From:</span> {ride.pickupAddress}
+                      </p>
+                      <p>
+                        <span className="font-bold">To:</span> {ride.dropoffAddress}
+                      </p>
+                      {ride.rating && typeof ride.rating.stars === 'number' && (
+                        <p>
+                          <span className="font-bold">Your rating:</span> {ride.rating.stars}★
+                          {ride.rating.createdAt && (
+                            <span className="ml-1 text-[11px] font-normal opacity-75">
+                              · {new Date(ride.rating.createdAt).toLocaleString()}
+                            </span>
+                          )}
+                        </p>
+                      )}
+                    </article>
+                  ))}
+              </div>
+            </div>
+            <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-t border-[#e8dfd6] px-5 py-4 dark:border-[#9d3733]/30">
+              <p className="text-xs font-semibold opacity-80">
+                Page {rideHistoryPageIndex + 1} of {rideHistoryTotalPages}
+              </p>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  disabled={rideHistoryPageIndex <= 0}
+                  onClick={() => setRideHistoryPage(rideHistoryPageIndex - 1)}
+                  className="rounded-lg border border-[#e8dfd6] px-3 py-2 text-xs font-bold transition enabled:hover:bg-[#ede8e0] disabled:opacity-40 dark:border-[#9d3733]/40 dark:enabled:hover:bg-[#9d3733]/15"
+                >
+                  Previous
+                </button>
+                <button
+                  type="button"
+                  disabled={rideHistoryPageIndex >= rideHistoryTotalPages - 1}
+                  onClick={() => setRideHistoryPage(rideHistoryPageIndex + 1)}
+                  className="rounded-lg border border-[#e8dfd6] px-3 py-2 text-xs font-bold transition enabled:hover:bg-[#ede8e0] disabled:opacity-40 dark:border-[#9d3733]/40 dark:enabled:hover:bg-[#9d3733]/15"
+                >
+                  Next
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </section>
+    </div>
   )
 }

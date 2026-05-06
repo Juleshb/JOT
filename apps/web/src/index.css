@@ -16,3 +16,100 @@ body {
   font-family: "Exo 2", "Rajdhani", system-ui, sans-serif;
 }
 
+/* About page trust spotlight — overlay motion */
+@keyframes jo-spotlight-badge-top {
+  0%,
+  100% {
+    transform: translateX(-50%) translateY(0);
+  }
+  50% {
+    transform: translateX(-50%) translateY(-7px);
+  }
+}
+
+@keyframes jo-spotlight-badge-bottom {
+  0%,
+  100% {
+    transform: translateX(-50%) translateY(0);
+  }
+  50% {
+    transform: translateX(-50%) translateY(7px);
+  }
+}
+
+@keyframes jo-spotlight-play {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.07);
+    opacity: 0.92;
+  }
+}
+
+@keyframes jo-spotlight-shield {
+  0%,
+  100% {
+    transform: translateY(0) rotate(0deg);
+  }
+  50% {
+    transform: translateY(-6px) rotate(-3deg);
+  }
+}
+
+@keyframes jo-spotlight-chip {
+  0%,
+  100% {
+    transform: translateY(-50%) translateX(0);
+    opacity: 0.95;
+  }
+  50% {
+    transform: translateY(-50%) translateX(6px);
+    opacity: 1;
+  }
+}
+
+@keyframes jo-spotlight-glow-pulse {
+  0%,
+  100% {
+    box-shadow: 0 4px 14px rgba(34, 197, 94, 0.45);
+  }
+  50% {
+    box-shadow: 0 6px 22px rgba(34, 197, 94, 0.72);
+  }
+}
+
+.jo-about-spotlight-badge-top {
+  animation: jo-spotlight-badge-top 2.8s ease-in-out infinite,
+    jo-spotlight-glow-pulse 2.2s ease-in-out infinite;
+}
+
+.jo-about-spotlight-badge-bottom {
+  animation: jo-spotlight-badge-bottom 2.8s ease-in-out infinite 0.35s,
+    jo-spotlight-glow-pulse 2.2s ease-in-out infinite 0.5s;
+}
+
+.jo-about-spotlight-play {
+  animation: jo-spotlight-play 2.4s ease-in-out infinite;
+}
+
+.jo-about-spotlight-shield {
+  animation: jo-spotlight-shield 3.2s ease-in-out infinite;
+}
+
+.jo-about-spotlight-chip {
+  animation: jo-spotlight-chip 3s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .jo-about-spotlight-badge-top,
+  .jo-about-spotlight-badge-bottom,
+  .jo-about-spotlight-play,
+  .jo-about-spotlight-shield,
+  .jo-about-spotlight-chip {
+    animation: none;
+  }
+}
+

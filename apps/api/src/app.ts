@@ -6,6 +6,7 @@ import { errorHandler } from './middleware/errorHandler.js';
 import { HttpError } from './lib/httpError.js';
 import adminRoutes from './routes/admin.js';
 import authRoutes from './routes/auth.js';
+import contactRoutes from './routes/contact.js';
 import driverRoutes from './routes/drivers.js';
 import paymentRoutes from './routes/payments.js';
 import rideRoutes from './routes/rides.js';
@@ -24,6 +25,7 @@ app.get('/health', (_req, res) => {
 });
 
 app.use('/auth', authRoutes);
+app.use('/contact', contactRoutes);
 app.use('/admin', adminRoutes);
 app.use('/drivers', driverRoutes);
 app.use('/payments', paymentRoutes);
