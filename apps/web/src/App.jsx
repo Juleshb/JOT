@@ -2613,7 +2613,7 @@ function App() {
                       onClick={() => navigateToPage('rider')}
                       className="mt-8 inline-flex w-full items-center justify-center gap-2 rounded-xl bg-[#4a1515] px-6 py-3.5 text-sm font-bold tracking-wide text-white shadow-[0_4px_24px_-10px_rgba(74,21,21,0.45)] transition hover:bg-[#3d1212] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#4a1515] focus-visible:ring-offset-2 sm:mt-9 sm:py-4"
                     >
-                      Book rider
+                      Book ride
                       <span aria-hidden>→</span>
                     </button>
                   )}
@@ -2827,7 +2827,7 @@ function App() {
                       onClick={() => navigateToPage('rider')}
                       className="inline-flex w-full items-center justify-center gap-2 rounded-xl border-2 border-[#4a1515] bg-transparent px-6 py-3.5 text-sm font-bold text-[#4a1515] transition hover:bg-[#4a1515]/5 focus:outline-none focus-visible:ring-2 focus-visible:ring-[#4a1515] focus-visible:ring-offset-2 sm:order-1 sm:w-auto sm:min-w-[200px]"
                     >
-                      Book rider
+                      Book ride
                     </button>
                   </div>
                 )}
@@ -3057,7 +3057,7 @@ function App() {
                       : 'bg-[#4a1515] text-white shadow-[0_4px_20px_-8px_rgba(74,21,21,0.4)] hover:bg-[#3d1212] focus-visible:ring-[#4a1515] focus-visible:ring-offset-white'
                   }`}
                 >
-                  Book rider
+                  Book ride
                   <span aria-hidden>→</span>
                 </button>
                 <button
