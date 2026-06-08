@@ -1,5 +1,29 @@
+import { useState } from 'react'
+
 const PAGE_BG = '#F5EFE6'
 const PANEL_BG = '#FFFCF9'
+
+function TeamAvatar({ leader }) {
+  const [photoFailed, setPhotoFailed] = useState(false)
+  const showPhoto = leader.photo && !photoFailed
+
+  return (
+    <div className="mx-auto h-28 w-28 overflow-hidden rounded-2xl bg-[#4a1515] shadow-[0_4px_20px_-8px_rgba(45,16,16,0.35)] ring-2 ring-[#e8dfd6]">
+      {showPhoto ? (
+        <img
+          src={leader.photo}
+          alt={`${leader.name}, ${leader.role}`}
+          className="h-full w-full object-cover"
+          onError={() => setPhotoFailed(true)}
+        />
+      ) : (
+        <div className="flex h-full w-full items-center justify-center font-brand text-2xl font-bold text-white">
+          {leader.initials}
+        </div>
+      )}
+    </div>
+  )
+}
 
 export default function AboutPage({ navigateToPage }) {
   const valueCards = [
@@ -75,9 +99,22 @@ export default function AboutPage({ navigateToPage }) {
   ]
 
   const leaders = [
-    { name: 'Aline M.', role: 'Chief Executive Officer', initials: 'AM' },
-    { name: 'David K.', role: 'Chief Operations Officer', initials: 'DK' },
-    { name: 'Ruth N.', role: 'Head of Safety', initials: 'RN' },
+    {
+      name: 'UWIMANA JOSEPH',
+      role: 'Chief Executive Officer',
+      initials: 'UJ',
+      photo: '/team/uwimana-joseph.png',
+    },
+    {
+      name: 'HABARUREMA Jules',
+      role: 'IT Officer',
+      initials: 'HJ',
+    },
+    {
+      name: 'U. Olivia',
+      role: 'Accountant Manager',
+      initials: 'UO',
+    },
   ]
 
   return (
@@ -342,9 +379,7 @@ export default function AboutPage({ navigateToPage }) {
                 key={leader.name}
                 className="rounded-2xl border border-[#e8dfd6] bg-white p-6 shadow-[0_2px_24px_-12px_rgba(45,16,16,0.08)] sm:p-7"
               >
-                <div className="mx-auto flex h-20 w-20 items-center justify-center rounded-2xl bg-[#4a1515] font-brand text-xl font-bold text-white shadow-inner">
-                  {leader.initials}
-                </div>
+                <TeamAvatar leader={leader} />
                 <p className="mt-5 text-center font-brand text-lg font-bold text-[#3d1212]">{leader.name}</p>
                 <p className="mt-1 text-center text-sm font-medium text-[#96724a]">{leader.role}</p>
               </article>

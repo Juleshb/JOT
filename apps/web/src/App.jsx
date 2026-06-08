@@ -17,6 +17,7 @@ import {
   updateRideLocations,
 } from './lib/api'
 import AuthModal from './components/AuthModal'
+import { resolveGoogleWebClientId } from './lib/googleAuth'
 import { formatDurationHoursMinutes } from './lib/formatDuration'
 import { estimateRideFareUsd } from './lib/estimateFare'
 import { addTrafficToMap, removeTrafficFromMap } from './lib/mapTraffic'
@@ -58,7 +59,7 @@ const DALLAS_DEFAULT_RIDER_COORDS = {
 /** Hero carousel images (JPEG assets in public/). */
 const WELCOME_HERO_SLIDES = [
   {
-    src: '/hero-suburban-black.jpg',
+    src: '/hero-suburban-black.png',
     alt: 'Chevrolet Suburban High Country in black, three-quarter front view',
     objectPosition: '32% 50%',
     kicker: 'Executive travel',
@@ -66,7 +67,7 @@ const WELCOME_HERO_SLIDES = [
     body: 'Discreet airport and hotel transfers with vetted chauffeurs, quiet cabins, and on-time pickup—every mile feels first class.',
   },
   {
-    src: '/hero-suburban-red.jpg',
+    src: '/hero-suburban-red.png',
     alt: 'Chevrolet Suburban High Country in red, side profile',
     objectPosition: '48% 52%',
     kicker: 'Groups & events',
@@ -74,7 +75,7 @@ const WELCOME_HERO_SLIDES = [
     body: 'Full-size luxury for families, teams, and celebrations: generous luggage space, climate control, and clear, upfront pricing.',
   },
   {
-    src: '/hero-suburban-white.jpg',
+    src: '/hero-suburban-white.png',
     alt: 'Chevrolet Suburban High Country in white, side profile',
     objectPosition: '52% 50%',
     kicker: 'Always on',
@@ -87,7 +88,7 @@ const getPageFromPath = (pathname) => {
   if (pathname === '/rider') return 'rider'
   if (pathname === '/ride') return 'rider'
   if (pathname === '/driver') return 'driver'
-  if (pathname === '/admin') return 'admin'
+  if (pathname === '/admin' || pathname.startsWith('/admin/')) return 'admin'
   if (pathname === '/profile') return 'profile'
   if (pathname === '/about') return 'about'
   if (pathname === '/contact') return 'contact'
@@ -297,7 +298,7 @@ function App() {
   const lastRiderVoiceUpdateRef = useRef(0)
   const hasAnnouncedDriverArrivalRef = useRef(false)
   const hasPromptedGoogleRef = useRef(false)
-  const googleClientId = import.meta.env.VITE_GOOGLE_CLIENT_ID ?? ''
+  const googleClientId = resolveGoogleWebClientId(import.meta.env.VITE_GOOGLE_CLIENT_ID)
   const mapboxAccessToken = import.meta.env.VITE_MAPBOX_ACCESS_TOKEN ?? ''
   const bookingSteps = [
     {
@@ -948,8 +949,8 @@ function App() {
       window.google.accounts.id.initialize({
         client_id: googleClientId,
         callback: handleGoogleCredential,
-        auto_select: true,
-        cancel_on_tap_outside: false,
+        auto_select: false,
+        cancel_on_tap_outside: true,
       })
       googleButtonRef.current.innerHTML = ''
       window.google.accounts.id.renderButton(googleButtonRef.current, {
@@ -2582,7 +2583,7 @@ function App() {
                     style={{ backgroundColor: WELCOME_CONTENT_PANEL_BG }}
                   >
                   <h1 className="font-brand text-[2rem] font-bold leading-[1.1] tracking-tight text-[#3d1212] sm:text-[2.75rem] sm:leading-[1.08]">
-                    <span className="text-[#4a1515]">Ride in Comfort.</span>
+                    <span className="text-[#4a1515]">Ride in Luxury.</span>
                     <br />
                     <span className="text-[#96724a]">Arrive in Style.</span>
                   </h1>
@@ -2750,7 +2751,7 @@ function App() {
                     </h2>
                   </div>
                 </div>
-                <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4 sm:gap-4">
+                <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-3 sm:gap-4 lg:grid-cols-4">
                   {[
                     {
                       label: 'Up to 7 Passengers',
@@ -2780,13 +2781,42 @@ function App() {
                       ),
                     },
                     {
-                      label: 'Wi-Fi, Charging Ports, and More',
+                      label: 'Free WiFi',
                       icon: (
                         <>
                           <path d="M5 12.55a11 11 0 0 1 14.08 0" strokeLinecap="round" />
                           <path d="M8.53 16.09a7 7 0 0 1 6.94 0" strokeLinecap="round" />
                           <path d="M12 20h.01" strokeLinecap="round" />
                         </>
+                      ),
+                    },
+                    {
+                      label: 'Entertainment TVs',
+                      icon: (
+                        <>
+                          <rect x="3" y="5" width="18" height="12" rx="1.5" />
+                          <path d="M8 21h8" strokeLinecap="round" />
+                          <path d="M12 17v4" strokeLinecap="round" />
+                        </>
+                      ),
+                    },
+                    {
+                      label: 'Snacks & Water',
+                      icon: (
+                        <>
+                          <path d="M8 4h8l-1 14H9L8 4Z" />
+                          <path d="M10 8h4" strokeLinecap="round" />
+                          <path d="M6 20c0-1.1.9-2 2-2h8c1.1 0 2 .9 2 2" strokeLinecap="round" />
+                        </>
+                      ),
+                    },
+                    {
+                      label: 'Charging Ports',
+                      icon: (
+                        <path
+                          d="M13 2 8 14h5l-1 8 7-14h-5l1-6Z"
+                          strokeLinejoin="round"
+                        />
                       ),
                     },
                   ].map((item) => (

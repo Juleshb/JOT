@@ -43,6 +43,7 @@ model User {
   passwordHash String
   name         String
   phone        String?
+  avatarUrl    String?
   role         UserRole
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt

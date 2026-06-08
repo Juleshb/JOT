@@ -156,10 +156,19 @@ export default function DriverPage({
   const profile = authUser?.driverProfile
   const isApproved = profile?.verificationStatus === 'APPROVED'
   const isOnline = Boolean(profile?.isOnline)
-  // Show the map as the primary full-screen surface whenever the driver
-  // is approved and Mapbox is configured; online/offline just changes state,
-  // not the layout.
-  const fullMapMode = Boolean(mapboxAccessToken) && isApproved && !mapWebGlError
+  const showDriverMap = Boolean(mapboxAccessToken) && isApproved && !mapWebGlError
+  // Full-screen map layout when Mapbox is available (same idea as rider map).
+  const fullMapMode = showDriverMap
+
+  const resolveMapCenter = useCallback(() => {
+    if (liveLocationRef.current) {
+      return { lat: liveLocationRef.current.lat, lng: liveLocationRef.current.lng }
+    }
+    if (profile?.currentLat != null && profile?.currentLng != null) {
+      return { lat: profile.currentLat, lng: profile.currentLng }
+    }
+    return null
+  }, [profile?.currentLat, profile?.currentLng])
 
   driverBasemapModeRef.current = driverBasemapMode
   driverTrafficOnRef.current = driverTrafficOn
@@ -290,13 +299,10 @@ export default function DriverPage({
       }
     }
 
-    const centerFromProfile =
-      profile?.currentLng != null && profile?.currentLat != null
-        ? { lat: profile.currentLat, lng: profile.currentLng }
-        : null
-    const start = liveLocationRef.current ?? centerFromProfile
-    const centerLng = start?.lng ?? 30.0619
-    const centerLat = start?.lat ?? -1.9441
+    const start = resolveMapCenter()
+    // Default near Dallas–Fort Worth (app service area) when no GPS yet.
+    const centerLng = start?.lng ?? -96.797
+    const centerLat = start?.lat ?? 32.7767
 
     let map
     try {
@@ -350,7 +356,57 @@ export default function DriverPage({
       mapRef.current = null
       driverMarkerRef.current = null
     }
-  }, [isOnline, isApproved, mapboxAccessToken, darkMode, driverBasemapMode])
+  }, [isApproved, mapboxAccessToken, darkMode, driverBasemapMode, resolveMapCenter])
+
+  /** Center map on driver when going online (do not tear down the map on toggle). */
+  useEffect(() => {
+    if (!isOnline || !isApproved) return undefined
+    const map = mapRef.current
+    const marker = driverMarkerRef.current
+    if (!map || !marker) return undefined
+
+    const center = resolveMapCenter()
+    if (!center) return undefined
+
+    const fly = () => {
+      try {
+        marker.setLngLat([center.lng, center.lat])
+        map.resize()
+        map.flyTo({
+          center: [center.lng, center.lat],
+          zoom: 15,
+          bearing: 0,
+          pitch: 0,
+          duration: 900,
+        })
+      } catch {
+        /* ignore */
+      }
+    }
+
+    if (map.isStyleLoaded()) {
+      fly()
+    } else {
+      map.once('load', fly)
+    }
+
+    const t = window.setTimeout(() => {
+      try {
+        map.resize()
+      } catch {
+        /* ignore */
+      }
+    }, 350)
+    return () => window.clearTimeout(t)
+  }, [
+    isOnline,
+    isApproved,
+    liveLocation?.lat,
+    liveLocation?.lng,
+    profile?.currentLat,
+    profile?.currentLng,
+    resolveMapCenter,
+  ])
 
   useEffect(() => {
     if (!mapRef.current || !isApproved) return
@@ -1493,6 +1549,27 @@ export default function DriverPage({
                 {routeChip}
               </div>
             ) : null}
+            {isOnline && liveLocation ? (
+              <div
+                className={`pointer-events-none absolute bottom-28 left-3 z-10 max-w-[min(90vw,280px)] rounded-xl border px-3 py-2 font-mono text-[10px] shadow-md sm:bottom-32 ${
+                  darkMode
+                    ? 'border-[#15803d]/50 bg-black/80 text-[#86efac]'
+                    : 'border-[#15803d]/40 bg-white/95 text-[#166534]'
+                }`}
+              >
+                Live · {liveLocation.lat.toFixed(5)}, {liveLocation.lng.toFixed(5)}
+              </div>
+            ) : !isOnline ? (
+              <div
+                className={`pointer-events-none absolute bottom-28 left-3 z-10 rounded-xl border px-3 py-2 text-xs font-semibold shadow-md sm:bottom-32 ${
+                  darkMode
+                    ? 'border-[#9d3733]/45 bg-black/75 text-[#f2e3bb]'
+                    : 'border-[#9d3733]/30 bg-white/90 text-[#9d3733]'
+                }`}
+              >
+                Tap GO to show your location on the map
+              </div>
+            ) : null}
 
             <div className="pointer-events-none absolute inset-x-0 top-0 z-10 flex items-start justify-between gap-2 p-3 pt-[max(0.5rem,env(safe-area-inset-top))]">
               <div
@@ -1929,11 +2006,6 @@ export default function DriverPage({
               <div className={`${mapPlaceholderClass} mt-4 opacity-80`}>
                 Map is available after your driver profile is approved.
               </div>
-            ) : !isOnline ? (
-              <div className={`${mapPlaceholderClass} mt-4`}>
-                  <p className="font-medium">Go online for full-screen driving map.</p>
-                <p className="mt-2 text-xs opacity-75">Allow location when your browser asks.</p>
-              </div>
             ) : mapWebGlError ? (
               <div className={`${mapPlaceholderClass} mt-4 text-[#9d3733]`}>{mapWebGlError}</div>
             ) : (
@@ -1956,6 +2028,18 @@ export default function DriverPage({
                   darkMode ? 'border-[#9d3733]/40' : 'border-[#9d3733]/30'
                 }`}
               />
+                  {!isOnline ? (
+                    <div
+                      className={`pointer-events-none absolute inset-0 flex items-center justify-center rounded-2xl px-4 text-center ${
+                        darkMode ? 'bg-black/55 text-[#f2e3bb]' : 'bg-white/75 text-[#2d100f]'
+                      }`}
+                    >
+                      <div>
+                        <p className="font-medium">Go online to show your live location</p>
+                        <p className="mt-1 text-xs opacity-80">Allow location when your browser asks.</p>
+                      </div>
+                    </div>
+                  ) : null}
                   {activeRide?.status === 'ACCEPTED' && (
                     <div
                       className={`pointer-events-none absolute left-3 top-3 rounded-full border px-3 py-1 text-xs font-semibold ${

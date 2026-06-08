@@ -6,8 +6,20 @@ import {
   adminUpdateUser,
   adminUsers,
 } from '../lib/api'
-
-const ROLES = ['', 'RIDER', 'DRIVER', 'ADMIN']
+import {
+  ADMIN_NAV,
+  adminCardClass,
+  adminDriverPath,
+  getAdminDriverId,
+  getAdminSection,
+} from '../lib/adminTheme'
+import AdminDriverDetail from './admin/AdminDriverDetail'
+import AdminLayout from './admin/AdminLayout'
+import AdminOverview from './admin/AdminOverview'
+import AdminUsers from './admin/AdminUsers'
+import AdminDrivers from './admin/AdminDrivers'
+import AdminRides from './admin/AdminRides'
+import AdminLiveMap from './admin/AdminLiveMap'
 
 export default function AdminPage({
   darkMode,
@@ -16,6 +28,10 @@ export default function AdminPage({
   navigateToPage,
   setAuthUser,
 }) {
+  const [section, setSection] = useState(() => getAdminSection(window.location.pathname))
+  const [selectedDriverId, setSelectedDriverId] = useState(() =>
+    getAdminDriverId(window.location.pathname),
+  )
   const [busy, setBusy] = useState(true)
   const [error, setError] = useState('')
   const [overview, setOverview] = useState(null)
@@ -26,48 +42,87 @@ export default function AdminPage({
   const [rideFilterStatus, setRideFilterStatus] = useState('')
   const [actionBusyId, setActionBusyId] = useState('')
 
-  const shellClass = `min-h-[calc(100dvh-5rem)] px-6 pb-20 pt-24 md:pt-28 ${
-    darkMode ? 'bg-[#0a0a0a] text-[#f2e3bb]' : 'bg-[#fffbf5] text-[#2d100f]'
-  }`
+  const cardClass = adminCardClass(darkMode)
+  const mapboxAccessToken = import.meta.env.VITE_MAPBOX_ACCESS_TOKEN ?? ''
+  const drivers = users.filter((u) => u.role === 'DRIVER' && u.driverProfile)
+  const pendingDriverCount = drivers.filter(
+    (d) => d.driverProfile?.verificationStatus === 'PENDING',
+  ).length
 
-  const cardClass = `rounded-2xl border p-5 md:p-6 ${
-    darkMode ? 'border-[#9d3733]/40 bg-[#111]' : 'border-[#9d3733]/30 bg-[#fff8eb]'
-  }`
+  const overviewWithPending = overview
+    ? { ...overview, pendingDriverCount }
+    : null
 
-  const inputClass = `w-full rounded-xl border px-3 py-2 text-sm outline-none ${
-    darkMode
-      ? 'border-[#9d3733]/45 bg-black text-[#f2e3bb]'
-      : 'border-[#9d3733]/30 bg-white text-[#2d100f]'
-  }`
-
-  const loadAll = useCallback(async () => {
-    if (!authToken) return
-    setBusy(true)
-    setError('')
-    try {
-      const [ov, u, r] = await Promise.all([
-        adminOverview(authToken),
-        adminUsers(authToken, {
-          role: userFilterRole || undefined,
-          q: userSearch.trim() || undefined,
-          take: 80,
-        }),
-        adminRides(authToken, { status: rideFilterStatus || undefined, take: 80 }),
-      ])
-      setOverview(ov)
-      setUsers(Array.isArray(u) ? u : [])
-      setRides(Array.isArray(r) ? r : [])
-    } catch (e) {
-      setError(e.message || 'Failed to load admin data.')
-    } finally {
-      setBusy(false)
+  const navigateAdminSection = useCallback((nextSection) => {
+    const item = ADMIN_NAV.find((n) => n.id === nextSection)
+    if (!item) return
+    const path = item.path
+    if (window.location.pathname !== path) {
+      window.history.pushState(null, '', path)
     }
-  }, [authToken, userFilterRole, userSearch, rideFilterStatus])
+    setSection(nextSection)
+  }, [])
+
+  const navigateToDriver = useCallback((userId) => {
+    const path = adminDriverPath(userId)
+    if (window.location.pathname !== path) {
+      window.history.pushState(null, '', path)
+    }
+    setSelectedDriverId(userId)
+    setSection('driver-detail')
+  }, [])
+
+  const navigateBackToDrivers = useCallback(() => {
+    const path = '/admin/drivers'
+    if (window.location.pathname !== path) {
+      window.history.pushState(null, '', path)
+    }
+    setSelectedDriverId(null)
+    setSection('drivers')
+  }, [])
 
   useEffect(() => {
-    if (!authToken || authUser?.role !== 'ADMIN') {
-      return undefined
+    const onPopState = () => {
+      const pathname = window.location.pathname
+      setSection(getAdminSection(pathname))
+      setSelectedDriverId(getAdminDriverId(pathname))
     }
+    window.addEventListener('popstate', onPopState)
+    return () => window.removeEventListener('popstate', onPopState)
+  }, [])
+
+  const loadData = useCallback(
+    async (opts = {}) => {
+      if (!authToken) return
+      setBusy(true)
+      setError('')
+      try {
+        const [ov, u, r] = await Promise.all([
+          adminOverview(authToken),
+          adminUsers(authToken, {
+            role: (opts.userRole ?? userFilterRole) || undefined,
+            q: (opts.userSearch ?? userSearch.trim()) || undefined,
+            take: 100,
+          }),
+          adminRides(authToken, {
+            status: (opts.rideStatus ?? rideFilterStatus) || undefined,
+            take: 100,
+          }),
+        ])
+        setOverview(ov)
+        setUsers(Array.isArray(u) ? u : [])
+        setRides(Array.isArray(r) ? r : [])
+      } catch (e) {
+        setError(e.message || 'Failed to load admin data.')
+      } finally {
+        setBusy(false)
+      }
+    },
+    [authToken, userFilterRole, userSearch, rideFilterStatus],
+  )
+
+  useEffect(() => {
+    if (!authToken || authUser?.role !== 'ADMIN') return undefined
     let cancelled = false
     ;(async () => {
       setBusy(true)
@@ -75,27 +130,34 @@ export default function AdminPage({
       try {
         const [ov, u, r] = await Promise.all([
           adminOverview(authToken),
-          adminUsers(authToken, { take: 80 }),
-          adminRides(authToken, { take: 80 }),
+          adminUsers(authToken, { take: 100 }),
+          adminRides(authToken, { take: 100 }),
         ])
         if (cancelled) return
         setOverview(ov)
         setUsers(Array.isArray(u) ? u : [])
         setRides(Array.isArray(r) ? r : [])
       } catch (e) {
-        if (!cancelled) {
-          setError(e.message || 'Failed to load admin data.')
-        }
+        if (!cancelled) setError(e.message || 'Failed to load admin data.')
       } finally {
-        if (!cancelled) {
-          setBusy(false)
-        }
+        if (!cancelled) setBusy(false)
       }
     })()
     return () => {
       cancelled = true
     }
   }, [authToken, authUser?.role])
+
+  useEffect(() => {
+    if (section === 'drivers' && userFilterRole !== 'DRIVER') {
+      setUserFilterRole('DRIVER')
+      if (authToken && authUser?.role === 'ADMIN') {
+        adminUsers(authToken, { role: 'DRIVER', take: 100 })
+          .then((u) => setUsers(Array.isArray(u) ? u : []))
+          .catch(() => {})
+      }
+    }
+  }, [section, authToken, authUser?.role, userFilterRole])
 
   const setUserRole = async (userId, role) => {
     if (!authToken) return
@@ -111,7 +173,21 @@ export default function AdminPage({
           return next
         })
       }
-      await loadAll()
+      await loadData()
+    } catch (e) {
+      setError(e.message || 'Could not update user.')
+    } finally {
+      setActionBusyId('')
+    }
+  }
+
+  const updateUserProfile = async (userId, payload) => {
+    if (!authToken) return
+    setActionBusyId(userId)
+    setError('')
+    try {
+      await adminUpdateUser(authToken, userId, payload)
+      await loadData()
     } catch (e) {
       setError(e.message || 'Could not update user.')
     } finally {
@@ -125,7 +201,7 @@ export default function AdminPage({
     setError('')
     try {
       await adminDriverVerification(authToken, userId, { verificationStatus })
-      await loadAll()
+      await loadData()
     } catch (e) {
       setError(e.message || 'Could not update verification.')
     } finally {
@@ -135,7 +211,7 @@ export default function AdminPage({
 
   if (!authUser) {
     return (
-      <div className={shellClass}>
+      <div className={`min-h-[calc(100dvh-5rem)] px-6 pb-20 pt-24 md:pt-28 ${darkMode ? 'bg-[#0a0a0a] text-[#f2e3bb]' : 'bg-[#fffbf5] text-[#2d100f]'}`}>
         <div className={`mx-auto max-w-lg ${cardClass}`}>
           <h1 className="font-brand text-2xl font-bold">Admin</h1>
           <p className="mt-3 text-sm opacity-90">Sign in to access the admin dashboard.</p>
@@ -153,7 +229,7 @@ export default function AdminPage({
 
   if (authUser.role !== 'ADMIN') {
     return (
-      <div className={shellClass}>
+      <div className={`min-h-[calc(100dvh-5rem)] px-6 pb-20 pt-24 md:pt-28 ${darkMode ? 'bg-[#0a0a0a] text-[#f2e3bb]' : 'bg-[#fffbf5] text-[#2d100f]'}`}>
         <div className={`mx-auto max-w-lg ${cardClass}`}>
           <h1 className="font-brand text-2xl font-bold">Admin</h1>
           <p className="mt-3 text-sm opacity-90">
@@ -171,296 +247,88 @@ export default function AdminPage({
     )
   }
 
-  const byRole = overview?.users?.byRole ?? {}
-  const byStatus = overview?.rides?.byStatus ?? {}
+  let content = null
+  if (section === 'users') {
+    content = (
+      <AdminUsers
+        darkMode={darkMode}
+        users={users}
+        busy={busy}
+        userFilterRole={userFilterRole}
+        setUserFilterRole={setUserFilterRole}
+        userSearch={userSearch}
+        setUserSearch={setUserSearch}
+        onApplyFilters={() => loadData()}
+        onSetUserRole={setUserRole}
+        onUpdateUser={updateUserProfile}
+        actionBusyId={actionBusyId}
+      />
+    )
+  } else if (section === 'driver-detail' && selectedDriverId) {
+    content = (
+      <AdminDriverDetail
+        darkMode={darkMode}
+        driverId={selectedDriverId}
+        authToken={authToken}
+        onBack={navigateBackToDrivers}
+        onSetDriverVerification={setDriverVerification}
+        actionBusyId={actionBusyId}
+      />
+    )
+  } else if (section === 'drivers') {
+    content = (
+      <AdminDrivers
+        darkMode={darkMode}
+        drivers={drivers}
+        busy={busy}
+        onViewDriver={navigateToDriver}
+        onOpenLiveMap={() => navigateAdminSection('live-map')}
+        onSetDriverVerification={setDriverVerification}
+        actionBusyId={actionBusyId}
+      />
+    )
+  } else if (section === 'live-map') {
+    content = (
+      <AdminLiveMap
+        darkMode={darkMode}
+        authToken={authToken}
+        mapboxAccessToken={mapboxAccessToken}
+        onViewDriver={navigateToDriver}
+      />
+    )
+  } else if (section === 'rides') {
+    content = (
+      <AdminRides
+        darkMode={darkMode}
+        rides={rides}
+        busy={busy}
+        rideFilterStatus={rideFilterStatus}
+        setRideFilterStatus={setRideFilterStatus}
+        onApplyFilters={() => loadData()}
+      />
+    )
+  } else {
+    content = (
+      <AdminOverview
+        darkMode={darkMode}
+        overview={overviewWithPending}
+        onNavigateSection={navigateAdminSection}
+      />
+    )
+  }
 
   return (
-    <div className={shellClass}>
-      <div className="mx-auto max-w-6xl space-y-8">
-        <div className="flex flex-wrap items-end justify-between gap-4">
-          <div>
-            <p className="text-xs font-semibold uppercase tracking-[0.2em] text-[#9d3733]">
-              Administration
-            </p>
-            <h1 className="font-brand text-3xl font-bold">Operations</h1>
-            <p className="mt-1 text-sm opacity-80">
-              Riders, drivers, verification, and recent ride activity.
-            </p>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <button
-              type="button"
-              onClick={() => loadAll()}
-              disabled={busy}
-              className="rounded-lg border border-[#9d3733]/50 px-4 py-2 text-sm font-bold text-[#9d3733] transition hover:bg-[#9d3733]/10 disabled:opacity-50"
-            >
-              Refresh
-            </button>
-            <button
-              type="button"
-              onClick={() => navigateToPage('home')}
-              className="rounded-lg bg-[#9d3733] px-4 py-2 text-sm font-bold text-[#f2e3bb] transition hover:bg-[#842f2b]"
-            >
-              Home
-            </button>
-          </div>
-        </div>
-
-        {error && (
-          <p className="rounded-xl border border-[#9d3733]/50 bg-[#9d3733]/10 px-4 py-3 text-sm text-[#9d3733]">
-            {error}
-          </p>
-        )}
-
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          <div className={cardClass}>
-            <p className="text-xs font-semibold uppercase tracking-wide text-[#9d3733]">Users</p>
-            <p className="mt-1 font-brand text-3xl font-bold">{overview?.users?.total ?? '—'}</p>
-            <p className="mt-2 text-xs opacity-80">
-              R {byRole.RIDER ?? 0} · D {byRole.DRIVER ?? 0} · A {byRole.ADMIN ?? 0}
-            </p>
-          </div>
-          <div className={cardClass}>
-            <p className="text-xs font-semibold uppercase tracking-wide text-[#9d3733]">Rides</p>
-            <p className="mt-1 font-brand text-3xl font-bold">{overview?.rides?.total ?? '—'}</p>
-            <p className="mt-2 text-xs opacity-80">
-              Req {byStatus.REQUESTED ?? 0} · Act {byStatus.ACCEPTED ?? 0} · Live {byStatus.STARTED ?? 0}
-            </p>
-          </div>
-          <div className={cardClass}>
-            <p className="text-xs font-semibold uppercase tracking-wide text-[#9d3733]">Done</p>
-            <p className="mt-1 font-brand text-3xl font-bold">{byStatus.COMPLETED ?? 0}</p>
-            <p className="mt-2 text-xs opacity-80">Completed trips</p>
-          </div>
-          <div className={cardClass}>
-            <p className="text-xs font-semibold uppercase tracking-wide text-[#9d3733]">Cancelled</p>
-            <p className="mt-1 font-brand text-3xl font-bold">{byStatus.CANCELLED ?? 0}</p>
-            <p className="mt-2 text-xs opacity-80">Cancelled trips</p>
-          </div>
-        </div>
-
-        <div className={cardClass}>
-          <h2 className="font-accent text-lg font-bold">Users</h2>
-          <p className="mt-1 text-sm opacity-80">
-            Filter and manage roles. Promoting someone to DRIVER requires an existing driver profile.
-          </p>
-          <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-end">
-            <div className="flex-1">
-              <label className="mb-1 block text-xs font-semibold opacity-70">Search</label>
-              <input
-                type="search"
-                value={userSearch}
-                onChange={(e) => setUserSearch(e.target.value)}
-                placeholder="Email or name"
-                className={inputClass}
-              />
-            </div>
-            <div className="sm:w-40">
-              <label className="mb-1 block text-xs font-semibold opacity-70">Role</label>
-              <select
-                value={userFilterRole}
-                onChange={(e) => setUserFilterRole(e.target.value)}
-                className={inputClass}
-              >
-                {ROLES.map((r) => (
-                  <option key={r || 'all'} value={r}>
-                    {r === '' ? 'All roles' : r}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <button
-              type="button"
-              onClick={() => loadAll()}
-              className="rounded-xl bg-[#9d3733] px-4 py-2 text-sm font-bold text-[#f2e3bb] transition hover:bg-[#842f2b]"
-            >
-              Apply
-            </button>
-          </div>
-
-          <div className="mt-4 overflow-x-auto">
-            <table className="w-full min-w-[640px] text-left text-sm">
-              <thead>
-                <tr className={`border-b ${darkMode ? 'border-[#9d3733]/35' : 'border-[#9d3733]/25'}`}>
-                  <th className="py-2 pr-3 font-semibold">Name</th>
-                  <th className="py-2 pr-3 font-semibold">Email</th>
-                  <th className="py-2 pr-3 font-semibold">Role</th>
-                  <th className="py-2 pr-3 font-semibold">Driver</th>
-                  <th className="py-2 font-semibold">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {busy && users.length === 0 ? (
-                  <tr>
-                    <td colSpan={5} className="py-6 opacity-70">
-                      Loading…
-                    </td>
-                  </tr>
-                ) : users.length === 0 ? (
-                  <tr>
-                    <td colSpan={5} className="py-6 opacity-70">
-                      No users match.
-                    </td>
-                  </tr>
-                ) : (
-                  users.map((u) => (
-                    <tr
-                      key={u.id}
-                      className={`border-b ${darkMode ? 'border-[#9d3733]/20' : 'border-[#9d3733]/15'}`}
-                    >
-                      <td className="py-2 pr-3 font-medium">{u.name}</td>
-                      <td className="py-2 pr-3 text-xs opacity-90">{u.email}</td>
-                      <td className="py-2 pr-3">
-                        <span className="rounded-full bg-[#9d3733]/20 px-2 py-0.5 text-xs font-bold text-[#9d3733]">
-                          {u.role}
-                        </span>
-                      </td>
-                      <td className="py-2 pr-3 text-xs">
-                        {u.driverProfile ? (
-                          <span>
-                            {u.driverProfile.verificationStatus}
-                            {u.driverProfile.isOnline ? ' · online' : ''}
-                          </span>
-                        ) : (
-                          '—'
-                        )}
-                      </td>
-                      <td className="py-2">
-                        <div className="flex flex-wrap gap-1">
-                          {['RIDER', 'DRIVER', 'ADMIN'].map((r) => (
-                            <button
-                              key={r}
-                              type="button"
-                              disabled={u.role === r || actionBusyId === u.id}
-                              onClick={() => setUserRole(u.id, r)}
-                              className="rounded border border-[#9d3733]/40 px-2 py-0.5 text-[11px] font-bold transition hover:bg-[#9d3733]/15 disabled:opacity-40"
-                            >
-                              {r[0]}
-                            </button>
-                          ))}
-                          {u.driverProfile && u.driverProfile.verificationStatus === 'PENDING' && (
-                            <>
-                              <button
-                                type="button"
-                                disabled={actionBusyId === `v-${u.id}`}
-                                onClick={() => setDriverVerification(u.id, 'APPROVED')}
-                                className="rounded bg-emerald-700 px-2 py-0.5 text-[11px] font-bold text-white"
-                              >
-                                Approve
-                              </button>
-                              <button
-                                type="button"
-                                disabled={actionBusyId === `v-${u.id}`}
-                                onClick={() => setDriverVerification(u.id, 'REJECTED')}
-                                className="rounded bg-[#842f2b] px-2 py-0.5 text-[11px] font-bold text-[#f2e3bb]"
-                              >
-                                Reject
-                              </button>
-                            </>
-                          )}
-                        </div>
-                      </td>
-                    </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        <div className={cardClass}>
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <h2 className="font-accent text-lg font-bold">Rides</h2>
-            <div className="flex flex-wrap items-center gap-2">
-              <select
-                value={rideFilterStatus}
-                onChange={(e) => setRideFilterStatus(e.target.value)}
-                className={`${inputClass} w-44`}
-              >
-                <option value="">All statuses</option>
-                <option value="REQUESTED">REQUESTED</option>
-                <option value="ACCEPTED">ACCEPTED</option>
-                <option value="STARTED">STARTED</option>
-                <option value="COMPLETED">COMPLETED</option>
-                <option value="CANCELLED">CANCELLED</option>
-              </select>
-              <button
-                type="button"
-                onClick={() => loadAll()}
-                className="rounded-lg border border-[#9d3733]/50 px-3 py-2 text-xs font-bold text-[#9d3733]"
-              >
-                Apply
-              </button>
-            </div>
-          </div>
-          <div className="mt-4 overflow-x-auto">
-            <table className="w-full min-w-[720px] text-left text-sm">
-              <thead>
-                <tr className={`border-b ${darkMode ? 'border-[#9d3733]/35' : 'border-[#9d3733]/25'}`}>
-                  <th className="py-2 pr-3 font-semibold">When</th>
-                  <th className="py-2 pr-3 font-semibold">Status</th>
-                  <th className="py-2 pr-3 font-semibold">Rider</th>
-                  <th className="py-2 pr-3 font-semibold">Driver</th>
-                  <th className="py-2 font-semibold">Route</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rides.length === 0 ? (
-                  <tr>
-                    <td colSpan={5} className="py-6 opacity-70">
-                      No rides.
-                    </td>
-                  </tr>
-                ) : (
-                  rides.map((ride) => (
-                    <tr
-                      key={ride.id}
-                      className={`border-b ${darkMode ? 'border-[#9d3733]/20' : 'border-[#9d3733]/15'}`}
-                    >
-                      <td className="py-2 pr-3 text-xs whitespace-nowrap">
-                        {new Date(ride.createdAt).toLocaleString()}
-                      </td>
-                      <td className="py-2 pr-3">
-                        <span className="font-semibold text-[#9d3733]">{ride.status}</span>
-                      </td>
-                      <td className="py-2 pr-3 text-xs">{ride.rider?.name ?? '—'}</td>
-                      <td className="py-2 pr-3 text-xs">{ride.driver?.name ?? '—'}</td>
-                      <td className="py-2 text-xs">
-                        {ride.pickupAddress} → {ride.dropoffAddress}
-                      </td>
-                    </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        <div className={cardClass}>
-          <h2 className="font-accent text-lg font-bold">Latest activity</h2>
-          <p className="mt-1 text-sm opacity-80">Most recent rides system-wide.</p>
-          <ul className="mt-3 space-y-2 text-sm">
-            {(overview?.recentRides ?? []).length === 0 ? (
-              <li className="opacity-70">No recent rides.</li>
-            ) : (
-              overview.recentRides.map((ride) => (
-                <li
-                  key={ride.id}
-                  className={`rounded-lg border px-3 py-2 text-xs ${
-                    darkMode ? 'border-[#9d3733]/30' : 'border-[#9d3733]/20'
-                  }`}
-                >
-                  <span className="font-bold text-[#9d3733]">{ride.status}</span>
-                  <span className="mx-2 opacity-40">·</span>
-                  {ride.rider?.name ?? 'Rider'} → {ride.driver?.name ?? 'Unassigned'}
-                  <span className="mx-2 opacity-40">·</span>
-                  {ride.pickupAddress}
-                </li>
-              ))
-            )}
-          </ul>
-        </div>
-      </div>
-    </div>
+    <AdminLayout
+      darkMode={darkMode}
+      authUser={authUser}
+      section={section}
+      onNavigateSection={navigateAdminSection}
+      onRefresh={() => loadData()}
+      busy={busy}
+      error={error}
+      navigateToPage={navigateToPage}
+    >
+      {content}
+    </AdminLayout>
   )
 }

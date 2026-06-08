@@ -4,7 +4,13 @@ import { z } from 'zod';
 import { HttpError } from '../lib/httpError.js';
 import { prisma } from '../lib/prisma.js';
 import { getStripeClient } from '../lib/stripe.js';
-import { broadcastRideOffer, broadcastRideOfferUpdate, emitRideUpdate, emitToUser } from '../socket.js';
+import {
+  broadcastRideOffer,
+  broadcastRideOfferUpdate,
+  emitAdminRideMap,
+  emitRideUpdate,
+  emitToUser,
+} from '../socket.js';
 import { requireAuth, requireRole, type AuthedRequest } from '../middleware/auth.js';
 
 const router = Router();
@@ -102,6 +108,8 @@ router.get('/nearby-drivers', requireAuth, requireRole('RIDER'), async (req, res
         userId: d.userId,
         name: d.user.name,
         phone: d.user.phone,
+        lat: d.currentLat!,
+        lng: d.currentLng!,
         vehicleMake: d.vehicleMake,
         vehicleModel: d.vehicleModel,
         vehicleColor: d.vehicleColor,
@@ -222,6 +230,20 @@ router.post('/', requireAuth, requireRole('RIDER'), async (req, res, next) => {
         message: 'Driver viewed request',
       });
     }
+
+    emitAdminRideMap({
+      ...ride,
+      driver: preferredDriverId
+        ? await prisma.user.findUnique({
+            where: { id: preferredDriverId },
+            select: {
+              id: true,
+              name: true,
+              driverProfile: { select: { currentLat: true, currentLng: true } },
+            },
+          })
+        : null,
+    });
 
     res.status(201).json(ride);
   } catch (e) {

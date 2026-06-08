@@ -3,6 +3,7 @@ import type { Server as HttpServer } from 'node:http';
 import type { UserRole } from '@prisma/client';
 import { Server } from 'socket.io';
 
+import { emitAdminRideMap } from './lib/adminMapRide.js';
 import { verifyToken } from './lib/jwt.js';
 import { prisma } from './lib/prisma.js';
 
@@ -47,6 +48,9 @@ export function initSocket(httpServer: HttpServer, corsOrigin: string) {
     if (role === 'DRIVER') {
       void socket.join('drivers:online');
     }
+    if (role === 'ADMIN') {
+      void socket.join('admins:live');
+    }
 
     socket.on('disconnect', (reason) => {
       console.log(`[socket] disconnected id=${socket.id} user=${userId} reason=${reason}`);
@@ -78,6 +82,13 @@ export function initSocket(httpServer: HttpServer, corsOrigin: string) {
         emitToUser(ride.riderId, 'driver:location', out);
         io?.to(`ride:${ride.id}`).emit('driver:location', out);
       }
+
+      io?.to('admins:live').emit('admin:driver_location', {
+        userId,
+        lat,
+        lng,
+        at: new Date().toISOString(),
+      });
     });
 
     socket.on('ride:subscribe', async (payload: { rideId: string }) => {
@@ -113,7 +124,13 @@ export function emitToUser(userId: string, event: string, data: unknown) {
 
 export function emitRideUpdate(rideId: string, payload: unknown) {
   io?.to(`ride:${rideId}`).emit('ride:status', payload);
+  const ride = (payload as { ride?: Parameters<typeof emitAdminRideMap>[0] })?.ride;
+  if (ride && typeof ride === 'object' && 'status' in ride && 'pickupLat' in ride) {
+    emitAdminRideMap(ride);
+  }
 }
+
+export { emitAdminRideMap } from './lib/adminMapRide.js';
 
 export function broadcastRideOffer(driverUserIds: string[], payload: unknown) {
   for (const id of driverUserIds) {
@@ -124,4 +141,12 @@ export function broadcastRideOffer(driverUserIds: string[], payload: unknown) {
 /** Notify all online drivers that a pending ride’s pickup/dropoff was updated (same shape as ride:offer). */
 export function broadcastRideOfferUpdate(payload: unknown) {
   io?.to('drivers:online').emit('ride:offer_update', payload);
+}
+
+export function emitAdminDriverOnline(payload: unknown) {
+  io?.to('admins:live').emit('admin:driver_online', payload);
+}
+
+export function emitAdminDriverOffline(userId: string) {
+  io?.to('admins:live').emit('admin:driver_offline', { userId });
 }

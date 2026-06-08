@@ -1,17 +1,20 @@
 import { Router } from 'express';
 import { randomUUID } from 'node:crypto';
 import bcrypt from 'bcryptjs';
-import { OAuth2Client } from 'google-auth-library';
 import { z } from 'zod';
 
 import { HttpError } from '../lib/httpError.js';
 import { signToken } from '../lib/jwt.js';
+import {
+  exchangeGoogleAuthCode,
+  publicUser,
+  signInWithGooglePayload,
+  verifyGoogleIdToken,
+} from '../lib/googleSignIn.js';
 import { prisma } from '../lib/prisma.js';
 import { requireAuth, type AuthedRequest } from '../middleware/auth.js';
 
 const router = Router();
-const googleClient = new OAuth2Client();
-const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 
 const registerSchema = z.object({
   email: z.string().email(),
@@ -68,7 +71,7 @@ router.post('/register', async (req, res, next) => {
     const token = signToken({ sub: user.id, role: user.role });
     res.status(201).json({
       token,
-      user: { id: user.id, email: user.email, name: user.name, role: user.role, avatarUrl: null },
+      user: publicUser(user),
     });
   } catch (e) {
     next(e);
@@ -95,7 +98,7 @@ router.post('/login', async (req, res, next) => {
     const token = signToken({ sub: user.id, role: user.role });
     res.json({
       token,
-      user: { id: user.id, email: user.email, name: user.name, role: user.role, avatarUrl: null },
+      user: publicUser(user),
     });
   } catch (e) {
     next(e);
@@ -108,50 +111,28 @@ const googleLoginSchema = z.object({
 
 router.post('/google', async (req, res, next) => {
   try {
-    if (!GOOGLE_CLIENT_ID) {
-      throw new HttpError(500, 'GOOGLE_CLIENT_ID is not configured');
-    }
-
     const { idToken } = googleLoginSchema.parse(req.body);
-    const ticket = await googleClient.verifyIdToken({
-      idToken,
-      audience: GOOGLE_CLIENT_ID,
-    });
-    const payload = ticket.getPayload();
+    const payload = await verifyGoogleIdToken(idToken);
+    const session = await signInWithGooglePayload(payload);
+    res.json(session);
+  } catch (e) {
+    next(e);
+  }
+});
 
-    if (!payload?.email || payload.email_verified !== true) {
-      throw new HttpError(401, 'Google account email is not verified');
-    }
+const googleCodeSchema = z.object({
+  code: z.string().min(1),
+  redirectUri: z.string().url(),
+});
 
-    const email = payload.email.trim().toLowerCase();
-    const displayName = payload.name?.trim() || email.split('@')[0];
-    const avatarUrl = payload.picture ?? null;
-
-    let user = await prisma.user.findUnique({ where: { email } });
-    if (!user) {
-      // Store a random hash for compatibility with existing schema.
-      const passwordHash = await bcrypt.hash(randomUUID(), 12);
-      user = await prisma.user.create({
-        data: {
-          email,
-          passwordHash,
-          name: displayName,
-          role: 'RIDER',
-        },
-      });
-    }
-
-    const token = signToken({ sub: user.id, role: user.role });
-    res.json({
-      token,
-      user: {
-        id: user.id,
-        email: user.email,
-        name: user.name,
-        role: user.role,
-        avatarUrl,
-      },
-    });
+/** Mobile / Expo Go: exchange OAuth authorization code for a session (requires GOOGLE_CLIENT_SECRET). */
+router.post('/google/code', async (req, res, next) => {
+  try {
+    const { code, redirectUri } = googleCodeSchema.parse(req.body);
+    const idToken = await exchangeGoogleAuthCode(code, redirectUri);
+    const payload = await verifyGoogleIdToken(idToken);
+    const session = await signInWithGooglePayload(payload);
+    res.json(session);
   } catch (e) {
     next(e);
   }
@@ -173,7 +154,7 @@ router.get('/me', requireAuth, async (req, res, next) => {
       name: user.name,
       phone: user.phone,
       role: user.role,
-      avatarUrl: null,
+      avatarUrl: user.avatarUrl ?? null,
       driverProfile: user.driverProfile,
     });
   } catch (e) {
@@ -215,7 +196,7 @@ router.patch('/me', requireAuth, async (req, res, next) => {
       name: user.name,
       phone: user.phone,
       role: user.role,
-      avatarUrl: null,
+      avatarUrl: user.avatarUrl ?? null,
       driverProfile: user.driverProfile,
     });
   } catch (e) {

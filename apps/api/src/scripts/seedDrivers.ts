@@ -43,6 +43,32 @@ const RUBAVU_DRIVERS: SeedDriver[] = [
   },
 ];
 
+/** Dallas–Fort Worth area — for local dev when testing on a US device/simulator. */
+const DALLAS_DRIVERS: SeedDriver[] = [
+  {
+    email: 'dallas.driver1@jotransport.rw',
+    name: 'Marcus DFW',
+    phone: '+12145550101',
+    vehicleMake: 'Toyota',
+    vehicleModel: 'Camry',
+    vehicleColor: 'Gray',
+    licensePlate: 'DFW 101',
+    lat: 32.7767,
+    lng: -96.797,
+  },
+  {
+    email: 'dallas.driver2@jotransport.rw',
+    name: 'Sofia DFW',
+    phone: '+12145550102',
+    vehicleMake: 'Honda',
+    vehicleModel: 'Accord',
+    vehicleColor: 'White',
+    licensePlate: 'DFW 102',
+    lat: 32.8998,
+    lng: -97.0403,
+  },
+];
+
 const MUSANZE_DRIVERS: SeedDriver[] = [
   {
     email: 'musanze.driver1@jotransport.rw',
@@ -113,15 +139,19 @@ async function upsertDriver(driver: SeedDriver, passwordHash: string) {
 }
 
 async function main() {
-  const drivers = [...RUBAVU_DRIVERS, ...MUSANZE_DRIVERS];
+  const drivers = [...RUBAVU_DRIVERS, ...MUSANZE_DRIVERS, ...DALLAS_DRIVERS];
   const passwordHash = await bcrypt.hash(SAMPLE_PASSWORD, 12);
 
   for (const driver of drivers) {
     await upsertDriver(driver, passwordHash);
   }
 
-  console.log(`Seeded ${drivers.length} online drivers.`);
-  console.log(`Sample login password: ${SAMPLE_PASSWORD}`);
+  console.log(`Seeded ${drivers.length} online drivers (Rubavu, Musanze, Dallas).`);
+  console.log(`Password for all seed drivers: ${SAMPLE_PASSWORD}`);
+  console.log('Examples:');
+  console.log('  dallas.driver1@jotransport.rw  (DFW — use for US testing)');
+  console.log('  rubavu.driver1@jotransport.rw  (Rwanda)');
+  console.log('Mobile dev: set EXPO_PUBLIC_DRIVER_USE_PROFILE_LOCATION=true to keep seed GPS on map.');
 }
 
 main()

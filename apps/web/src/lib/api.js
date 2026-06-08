@@ -231,6 +231,30 @@ export async function adminUpdateUser(token, userId, payload) {
   })
 }
 
+export async function adminDriverDetail(token, driverUserId) {
+  return request(`/admin/drivers/${driverUserId}`, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+  })
+}
+
+export async function adminDriverLocations(token) {
+  return request('/admin/drivers/locations', {
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+  })
+}
+
+export async function adminActiveRides(token) {
+  return request('/admin/map/active-rides', {
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+  })
+}
+
 export async function adminDriverVerification(token, driverUserId, payload) {
   return request(`/admin/drivers/${driverUserId}/verification`, {
     method: 'PATCH',

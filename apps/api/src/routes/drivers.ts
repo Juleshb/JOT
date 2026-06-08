@@ -3,6 +3,10 @@ import { z } from 'zod';
 
 import { HttpError } from '../lib/httpError.js';
 import { prisma } from '../lib/prisma.js';
+import {
+  emitAdminDriverOffline,
+  emitAdminDriverOnline,
+} from '../socket.js';
 import { requireAuth, requireRole, type AuthedRequest } from '../middleware/auth.js';
 
 const router = Router();
@@ -24,14 +28,57 @@ router.patch('/me/status', requireAuth, requireRole('DRIVER'), async (req, res, 
     if (profile.verificationStatus !== 'APPROVED') {
       throw new HttpError(403, 'Driver not verified');
     }
+    if (body.isOnline) {
+      const lat = body.lat;
+      const lng = body.lng;
+      if (
+        lat == null ||
+        lng == null ||
+        !Number.isFinite(lat) ||
+        !Number.isFinite(lng)
+      ) {
+        throw new HttpError(400, 'lat and lng are required when going online');
+      }
+    }
     const updated = await prisma.driverProfile.update({
       where: { userId },
       data: {
         isOnline: body.isOnline,
-        currentLat: body.lat ?? profile.currentLat,
-        currentLng: body.lng ?? profile.currentLng,
+        currentLat: body.isOnline
+          ? body.lat!
+          : body.lat ?? profile.currentLat,
+        currentLng: body.isOnline
+          ? body.lng!
+          : body.lng ?? profile.currentLng,
+      },
+      include: {
+        user: {
+          select: { id: true, name: true, email: true, phone: true, avatarUrl: true },
+        },
       },
     });
+
+    if (body.isOnline && updated.verificationStatus === 'APPROVED') {
+      emitAdminDriverOnline({
+        userId: updated.userId,
+        name: updated.user.name,
+        email: updated.user.email,
+        phone: updated.user.phone,
+        avatarUrl: updated.user.avatarUrl,
+        lat: updated.currentLat,
+        lng: updated.currentLng,
+        vehicleMake: updated.vehicleMake,
+        vehicleModel: updated.vehicleModel,
+        vehicleColor: updated.vehicleColor,
+        licensePlate: updated.licensePlate,
+        averageRiderRating: updated.averageRiderRating,
+        riderRatingCount: updated.riderRatingCount,
+        updatedAt: updated.updatedAt,
+      });
+    } else if (!body.isOnline) {
+      emitAdminDriverOffline(userId);
+    }
+
     res.json(updated);
   } catch (e) {
     next(e);
