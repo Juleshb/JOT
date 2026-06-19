@@ -2130,15 +2130,15 @@ function App() {
     >
       <header
         className={`fixed inset-x-0 top-0 z-50 border-b backdrop-blur-md transition-colors duration-300 ${
-          darkMode ? 'border-[#9d3733]/40' : 'border-[#9d3733]/35'
+          darkMode
+            ? 'border-[#9d3733]/40 bg-black/85'
+            : 'border-[#9d3733]/35 bg-white/95'
         }`}
       >
         <div className="mx-auto flex w-full max-w-6xl items-center justify-between gap-3 px-3 py-3 sm:px-6 sm:py-4">
           <div className="flex min-w-0 items-center gap-2 sm:gap-3">
-            <img src={icon} alt="JO icon" className="h-8 w-8 rounded-full sm:h-10 sm:w-10" />
-            <span className="font-brand truncate text-base font-semibold tracking-wide sm:text-lg">
-              JO Transportation
-            </span>
+            <img src={icon} alt="JO icon" className="h-14 w-14 rounded-full sm:h-16 sm:w-16" />
+            
           </div>
           <nav className="hidden items-center gap-3 text-sm font-medium md:flex">
             <button
@@ -2334,7 +2334,7 @@ function App() {
             className={`mx-auto mb-3 w-[calc(100%-1.5rem)] max-w-6xl rounded-2xl border p-2 shadow-lg md:hidden ${
               darkMode
                 ? 'border-[#9d3733]/45 bg-[#0f0f0f] text-[#f2e3bb]'
-                : 'border-[#9d3733]/35 bg-[#fff8eb] text-[#2d100f]'
+                : 'border-[#9d3733]/35 bg-white/95 text-[#2d100f]'
             }`}
           >
             <div className="grid grid-cols-2 gap-2 text-sm">
