@@ -29,6 +29,7 @@ import DriverPage from './pages/DriverPage'
 import AdminPage from './pages/AdminPage'
 import AboutPage from './pages/AboutPage'
 import ContactPage from './pages/ContactPage'
+import usePageSeo from './hooks/usePageSeo'
 
 const pageToPath = {
   home: '/',
@@ -205,6 +206,7 @@ function App() {
   const [userMenuOpen, setUserMenuOpen] = useState(false)
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
   const [activePage, setActivePage] = useState(() => getPageFromPath(window.location.pathname))
+  usePageSeo(activePage)
   const [profileForm, setProfileForm] = useState({ name: '', phone: '' })
   const [profileBusy, setProfileBusy] = useState(false)
   const [profileMessage, setProfileMessage] = useState('')
