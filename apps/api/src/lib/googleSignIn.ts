@@ -59,7 +59,9 @@ export async function exchangeGoogleAuthCode(code: string, redirectUri: string):
     );
   }
 
-  const webClientId = getGoogleClientIds()[0];
+  const webClientId =
+    process.env.GOOGLE_WEB_CLIENT_ID?.trim().replace(/^["']|["']$/g, '') ||
+    getGoogleClientIds()[0];
   if (!webClientId) {
     throw new HttpError(500, 'GOOGLE_CLIENT_ID is not configured');
   }

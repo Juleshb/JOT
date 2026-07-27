@@ -44,7 +44,7 @@ function ChartCard({ title, subtitle, darkMode, children }) {
     <div className={adminCardClass(darkMode)}>
       <h3 className="font-accent text-lg font-bold">{title}</h3>
       {subtitle && <p className="mt-1 text-sm opacity-80">{subtitle}</p>}
-      <div className="mt-4 h-64 w-full">{children}</div>
+      <div className="mt-4 h-52 w-full sm:h-64">{children}</div>
     </div>
   )
 }

@@ -43,10 +43,61 @@ export default function AdminUsers({
     setEditingId(null)
   }
 
+  const emptyState = busy && users.length === 0 ? 'Loading…' : 'No users match your filters.'
+
+  const renderActions = (u) =>
+    editingId === u.id ? (
+      <div className="flex flex-wrap gap-1.5">
+        <input
+          value={editPhone}
+          onChange={(e) => setEditPhone(e.target.value)}
+          placeholder="Phone"
+          className={`${inputClass} max-w-[140px]`}
+        />
+        <button
+          type="button"
+          disabled={actionBusyId === u.id}
+          onClick={() => saveEdit(u.id)}
+          className="rounded-lg bg-emerald-700 px-2.5 py-1.5 text-[11px] font-bold text-white"
+        >
+          Save
+        </button>
+        <button
+          type="button"
+          onClick={() => setEditingId(null)}
+          className="rounded-lg border border-[#9d3733]/40 px-2.5 py-1.5 text-[11px] font-bold"
+        >
+          Cancel
+        </button>
+      </div>
+    ) : (
+      <div className="flex flex-wrap gap-1.5">
+        <button
+          type="button"
+          onClick={() => startEdit(u)}
+          className="rounded-lg border border-[#9d3733]/40 px-2.5 py-1.5 text-[11px] font-bold transition hover:bg-[#9d3733]/10"
+        >
+          Edit
+        </button>
+        {['RIDER', 'DRIVER', 'ADMIN'].map((r) => (
+          <button
+            key={r}
+            type="button"
+            disabled={u.role === r || actionBusyId === u.id}
+            onClick={() => onSetUserRole(u.id, r)}
+            className="rounded-lg border border-[#9d3733]/40 px-2.5 py-1.5 text-[11px] font-bold transition hover:bg-[#9d3733]/15 disabled:opacity-40"
+            title={`Set role to ${r}`}
+          >
+            {r[0]}
+          </button>
+        ))}
+      </div>
+    )
+
   return (
     <>
       <header>
-        <h2 className="font-brand text-2xl font-bold">Users</h2>
+        <h2 className="font-brand text-xl font-bold sm:text-2xl">Users</h2>
         <p className="mt-1 text-sm opacity-80">Search accounts, edit profiles, and manage roles.</p>
       </header>
 
@@ -80,13 +131,55 @@ export default function AdminUsers({
           <button
             type="button"
             onClick={onApplyFilters}
-            className="rounded-xl bg-[#9d3733] px-4 py-2 text-sm font-bold text-[#f2e3bb] transition hover:bg-[#842f2b]"
+            className="w-full rounded-xl bg-[#9d3733] px-4 py-2.5 text-sm font-bold text-[#f2e3bb] transition hover:bg-[#842f2b] sm:w-auto"
           >
             Apply
           </button>
         </div>
 
-        <div className="mt-6 overflow-x-auto">
+        {/* Mobile cards */}
+        <div className="mt-5 space-y-3 md:hidden">
+          {users.length === 0 ? (
+            <p className="py-8 text-center text-sm opacity-70">{emptyState}</p>
+          ) : (
+            users.map((u) => (
+              <article
+                key={u.id}
+                className={`rounded-xl border p-3.5 ${
+                  darkMode ? 'border-[#9d3733]/30 bg-black/30' : 'border-[#9d3733]/20 bg-white/70'
+                }`}
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    {editingId === u.id ? (
+                      <input
+                        value={editName}
+                        onChange={(e) => setEditName(e.target.value)}
+                        className={inputClass}
+                      />
+                    ) : (
+                      <p className="truncate font-semibold">{u.name}</p>
+                    )}
+                    <p className="mt-0.5 truncate text-xs opacity-70">{u.email}</p>
+                  </div>
+                  <RoleBadge role={u.role} />
+                </div>
+                {u.driverProfile && (
+                  <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+                    <StatusBadge status={u.driverProfile.verificationStatus} />
+                    {u.driverProfile.isOnline && (
+                      <span className="font-semibold text-emerald-700">Online</span>
+                    )}
+                  </div>
+                )}
+                <div className="mt-3">{renderActions(u)}</div>
+              </article>
+            ))
+          )}
+        </div>
+
+        {/* Desktop table */}
+        <div className="mt-6 hidden overflow-x-auto md:block">
           <table className="w-full min-w-[720px] text-left text-sm">
             <thead>
               <tr className={adminTableHeadClass(darkMode)}>
@@ -98,16 +191,10 @@ export default function AdminUsers({
               </tr>
             </thead>
             <tbody>
-              {busy && users.length === 0 ? (
+              {users.length === 0 ? (
                 <tr>
                   <td colSpan={5} className="py-8 text-center opacity-70">
-                    Loading…
-                  </td>
-                </tr>
-              ) : users.length === 0 ? (
-                <tr>
-                  <td colSpan={5} className="py-8 text-center opacity-70">
-                    No users match your filters.
+                    {emptyState}
                   </td>
                 </tr>
               ) : (
@@ -133,62 +220,14 @@ export default function AdminUsers({
                         <span className="flex flex-col gap-1">
                           <StatusBadge status={u.driverProfile.verificationStatus} />
                           {u.driverProfile.isOnline && (
-                            <span className="text-emerald-700 font-semibold">Online</span>
+                            <span className="font-semibold text-emerald-700">Online</span>
                           )}
                         </span>
                       ) : (
                         '—'
                       )}
                     </td>
-                    <td className="py-3">
-                      {editingId === u.id ? (
-                        <div className="flex flex-wrap gap-1">
-                          <input
-                            value={editPhone}
-                            onChange={(e) => setEditPhone(e.target.value)}
-                            placeholder="Phone"
-                            className={`${inputClass} max-w-[120px]`}
-                          />
-                          <button
-                            type="button"
-                            disabled={actionBusyId === u.id}
-                            onClick={() => saveEdit(u.id)}
-                            className="rounded bg-emerald-700 px-2 py-1 text-[11px] font-bold text-white"
-                          >
-                            Save
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setEditingId(null)}
-                            className="rounded border border-[#9d3733]/40 px-2 py-1 text-[11px] font-bold"
-                          >
-                            Cancel
-                          </button>
-                        </div>
-                      ) : (
-                        <div className="flex flex-wrap gap-1">
-                          <button
-                            type="button"
-                            onClick={() => startEdit(u)}
-                            className="rounded border border-[#9d3733]/40 px-2 py-0.5 text-[11px] font-bold transition hover:bg-[#9d3733]/10"
-                          >
-                            Edit
-                          </button>
-                          {['RIDER', 'DRIVER', 'ADMIN'].map((r) => (
-                            <button
-                              key={r}
-                              type="button"
-                              disabled={u.role === r || actionBusyId === u.id}
-                              onClick={() => onSetUserRole(u.id, r)}
-                              className="rounded border border-[#9d3733]/40 px-2 py-0.5 text-[11px] font-bold transition hover:bg-[#9d3733]/15 disabled:opacity-40"
-                              title={`Set role to ${r}`}
-                            >
-                              {r[0]}
-                            </button>
-                          ))}
-                        </div>
-                      )}
-                    </td>
+                    <td className="py-3">{renderActions(u)}</td>
                   </tr>
                 ))
               )}

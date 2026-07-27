@@ -483,12 +483,12 @@ export default function AdminLiveMap({ darkMode, authToken, mapboxAccessToken, o
 
   return (
     <>
-      <header className="flex flex-wrap items-end justify-between gap-4">
+      <header className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end sm:justify-between">
         <div>
-          <h2 className="font-brand text-2xl font-bold">Live driver map</h2>
+          <h2 className="font-brand text-xl font-bold sm:text-2xl">Live driver map</h2>
           <p className="mt-1 text-sm opacity-80">
-            Live drivers and active riders on trip routes. Click a rider to zoom in, or export a trip
-            snapshot image.
+            Live drivers and active riders on trip routes. Tap a rider to zoom in, or export a trip
+            snapshot.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
@@ -557,7 +557,7 @@ export default function AdminLiveMap({ darkMode, authToken, mapboxAccessToken, o
         <div className={cardClass}>
           <div
             ref={mapContainerRef}
-            className={`relative h-[min(70vh,560px)] w-full overflow-hidden rounded-2xl border ${
+            className={`relative h-[min(55vh,420px)] w-full overflow-hidden rounded-2xl border sm:h-[min(70vh,560px)] ${
               darkMode ? 'border-[#9d3733]/40' : 'border-[#9d3733]/30'
             }`}
           />

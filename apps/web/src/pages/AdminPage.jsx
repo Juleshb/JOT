@@ -14,6 +14,7 @@ import {
   getAdminSection,
 } from '../lib/adminTheme'
 import AdminDriverDetail from './admin/AdminDriverDetail'
+import AdminGallery from './admin/AdminGallery'
 import AdminLayout from './admin/AdminLayout'
 import AdminOverview from './admin/AdminOverview'
 import AdminUsers from './admin/AdminUsers'
@@ -307,6 +308,8 @@ export default function AdminPage({
         onApplyFilters={() => loadData()}
       />
     )
+  } else if (section === 'gallery') {
+    content = <AdminGallery darkMode={darkMode} authToken={authToken} />
   } else {
     content = (
       <AdminOverview

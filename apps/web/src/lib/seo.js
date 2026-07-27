@@ -5,7 +5,7 @@ const DEFAULT_DESCRIPTION =
 
 const DEFAULT_OG_IMAGE = '/welcome-hero.png'
 
-export const PUBLIC_INDEXABLE_PATHS = ['/', '/about', '/contact', '/ride']
+export const PUBLIC_INDEXABLE_PATHS = ['/', '/about', '/contact', '/gallery', '/ride']
 
 export const PAGE_SEO = {
   home: {
@@ -26,6 +26,13 @@ export const PAGE_SEO = {
     description:
       'Contact JO Transportation for ride support, partnerships, and billing questions. Email jotransportation2@gmail.com or call +1 (682) 786-1241.',
     path: '/contact',
+    index: true,
+  },
+  gallery: {
+    title: 'Gallery | JO Transportation',
+    description:
+      'Browse photos of the JO Transportation fleet and luxury Suburban rides across Dallas–Fort Worth.',
+    path: '/gallery',
     index: true,
   },
   rider: {

@@ -1,15 +1,19 @@
 export default function StatCard({ label, value, hint, accent, darkMode, onClick }) {
-  const cardClass = `rounded-2xl border p-5 transition ${
+  const cardClass = `rounded-2xl border p-4 sm:p-5 transition ${
     darkMode ? 'border-[#9d3733]/40 bg-[#111]' : 'border-[#9d3733]/30 bg-[#fff8eb]'
-  } ${onClick ? 'cursor-pointer hover:border-[#9d3733]/60 hover:shadow-md' : ''}`
+  } ${onClick ? 'cursor-pointer hover:border-[#9d3733]/60 hover:shadow-md active:scale-[0.99]' : ''}`
 
   const inner = (
     <>
-      <p className="text-xs font-semibold uppercase tracking-wide text-[#9d3733]">{label}</p>
-      <p className={`mt-1 font-brand text-3xl font-bold ${accent ? 'text-[#9d3733]' : ''}`}>
+      <p className="text-[10px] font-semibold uppercase tracking-wide text-[#9d3733] sm:text-xs">
+        {label}
+      </p>
+      <p
+        className={`mt-1 font-brand text-2xl font-bold sm:text-3xl ${accent ? 'text-[#9d3733]' : ''}`}
+      >
         {value ?? '—'}
       </p>
-      {hint && <p className="mt-2 text-xs opacity-80">{hint}</p>}
+      {hint && <p className="mt-1.5 text-[11px] opacity-80 sm:mt-2 sm:text-xs">{hint}</p>}
     </>
   )
 

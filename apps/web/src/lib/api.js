@@ -277,4 +277,62 @@ export async function adminRides(token, { status, take } = {}) {
   })
 }
 
+function absoluteUploadUrl(url) {
+  if (!url) return url
+  if (url.startsWith('http://') || url.startsWith('https://')) return url
+  return `${API_BASE_URL}${url}`
+}
+
+/** @returns {Promise<{ images: Array<{ id: string, url: string, description: string | null, createdAt: string }> }>} */
+export async function listGalleryImages() {
+  const data = await request('/gallery')
+  if (Array.isArray(data?.images)) {
+    data.images = data.images.map((img) => ({
+      ...img,
+      url: absoluteUploadUrl(img.url),
+    }))
+  }
+  return data
+}
+
+/** @param {File[]} files */
+export async function adminUploadGalleryImages(token, files, { description } = {}) {
+  const form = new FormData()
+  for (const file of files) {
+    form.append('images', file)
+  }
+  if (description) form.append('description', description)
+
+  const response = await fetch(`${API_BASE_URL}/gallery`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+    body: form,
+  })
+
+  const data = await response.json().catch(() => ({}))
+  if (!response.ok) {
+    throw new Error(data?.message ?? data?.error ?? 'Upload failed')
+  }
+
+  // Normalize relative upload URLs to absolute for the web app origin.
+  if (Array.isArray(data?.images)) {
+    data.images = data.images.map((img) => ({
+      ...img,
+      url: absoluteUploadUrl(img.url),
+    }))
+  }
+  return data
+}
+
+export async function adminDeleteGalleryImage(token, imageId) {
+  return request(`/gallery/${imageId}`, {
+    method: 'DELETE',
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+  })
+}
+
 export { API_BASE_URL }

@@ -109,7 +109,7 @@ export default function AdminDriverDetail({
               </div>
             )}
             <div>
-              <h2 className="font-brand text-2xl font-bold">{driver.name}</h2>
+              <h2 className="font-brand text-xl font-bold sm:text-2xl">{driver.name}</h2>
               <p className="text-sm opacity-80">{driver.email}</p>
               <div className="mt-2 flex flex-wrap items-center gap-2">
                 <StatusBadge status={profile.verificationStatus} />
@@ -124,7 +124,7 @@ export default function AdminDriverDetail({
             </div>
           </div>
         </div>
-        <div className="flex flex-wrap gap-2">
+        <div className="flex w-full flex-wrap gap-2 sm:w-auto">
           {profile.verificationStatus !== 'APPROVED' && (
             <button
               type="button"
@@ -133,7 +133,7 @@ export default function AdminDriverDetail({
                 await onSetDriverVerification(driver.id, 'APPROVED')
                 load()
               }}
-              className="rounded-lg bg-emerald-700 px-3 py-2 text-xs font-bold text-white disabled:opacity-50"
+              className="flex-1 rounded-xl bg-emerald-700 px-3 py-2.5 text-xs font-bold text-white disabled:opacity-50 sm:flex-none"
             >
               Approve
             </button>
@@ -146,7 +146,7 @@ export default function AdminDriverDetail({
                 await onSetDriverVerification(driver.id, 'REJECTED')
                 load()
               }}
-              className="rounded-lg bg-[#842f2b] px-3 py-2 text-xs font-bold text-[#f2e3bb] disabled:opacity-50"
+              className="flex-1 rounded-xl bg-[#842f2b] px-3 py-2.5 text-xs font-bold text-[#f2e3bb] disabled:opacity-50 sm:flex-none"
             >
               Reject
             </button>
@@ -155,7 +155,7 @@ export default function AdminDriverDetail({
             type="button"
             onClick={load}
             disabled={busy}
-            className="rounded-lg border border-[#9d3733]/50 px-3 py-2 text-xs font-bold text-[#9d3733] disabled:opacity-50"
+            className="flex-1 rounded-xl border border-[#9d3733]/50 px-3 py-2.5 text-xs font-bold text-[#9d3733] disabled:opacity-50 sm:flex-none"
           >
             Refresh
           </button>

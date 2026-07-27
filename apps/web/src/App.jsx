@@ -29,6 +29,7 @@ import DriverPage from './pages/DriverPage'
 import AdminPage from './pages/AdminPage'
 import AboutPage from './pages/AboutPage'
 import ContactPage from './pages/ContactPage'
+import GalleryPage from './pages/GalleryPage'
 import usePageSeo from './hooks/usePageSeo'
 
 const pageToPath = {
@@ -39,6 +40,7 @@ const pageToPath = {
   profile: '/profile',
   about: '/about',
   contact: '/contact',
+  gallery: '/gallery',
 }
 
 /** Avoid losing stars when refetch returns the same ride without `rating` (race / stale `/rides/active`). */
@@ -93,6 +95,7 @@ const getPageFromPath = (pathname) => {
   if (pathname === '/profile') return 'profile'
   if (pathname === '/about') return 'about'
   if (pathname === '/contact') return 'contact'
+  if (pathname === '/gallery') return 'gallery'
   return 'home'
 }
 
@@ -2206,6 +2209,17 @@ function App() {
             </button>
             <button
               type="button"
+              onClick={() => navigateToPage('gallery')}
+              className={`rounded-full px-3 py-1.5 transition ${
+                activePage === 'gallery'
+                  ? 'bg-[#9d3733] text-[#f2e3bb]'
+                  : 'hover:bg-[#9d3733]/10 hover:text-[#9d3733]'
+              }`}
+            >
+              Gallery
+            </button>
+            <button
+              type="button"
               onClick={() => navigateToPage('contact')}
               className={`rounded-full px-3 py-1.5 transition ${
                 activePage === 'contact'
@@ -2393,6 +2407,15 @@ function App() {
               </button>
               <button
                 type="button"
+                onClick={() => navigateToPage('gallery')}
+                className={`rounded-xl px-3 py-2 text-left font-semibold ${
+                  activePage === 'gallery' ? 'bg-[#9d3733] text-[#f2e3bb]' : 'hover:bg-[#9d3733]/10'
+                }`}
+              >
+                Gallery
+              </button>
+              <button
+                type="button"
                 onClick={() => navigateToPage('contact')}
                 className={`rounded-xl px-3 py-2 text-left font-semibold ${
                   activePage === 'contact' ? 'bg-[#9d3733] text-[#f2e3bb]' : 'hover:bg-[#9d3733]/10'
@@ -2563,6 +2586,8 @@ function App() {
         />
       ) : activePage === 'about' ? (
         <AboutPage navigateToPage={navigateToPage} />
+      ) : activePage === 'gallery' ? (
+        <GalleryPage navigateToPage={navigateToPage} />
       ) : activePage === 'contact' ? (
         <ContactPage navigateToPage={navigateToPage} />
       ) : (
@@ -3111,7 +3136,10 @@ function App() {
         </>
       )}
 
-      {(activePage === 'home' || activePage === 'about' || activePage === 'contact') && (
+      {(activePage === 'home' ||
+        activePage === 'about' ||
+        activePage === 'gallery' ||
+        activePage === 'contact') && (
       <footer
         id="site-footer"
         className={`scroll-mt-28 border-t transition-colors duration-300 ${
@@ -3201,9 +3229,20 @@ function App() {
                 Company
               </h3>
               <div className="mt-4 flex flex-col gap-3 text-sm">
-                <a href="#" className="transition hover:text-[#9d3733]">
+                <button
+                  type="button"
+                  onClick={() => navigateToPage('about')}
+                  className="text-left transition hover:text-[#9d3733]"
+                >
                   About us
-                </a>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => navigateToPage('gallery')}
+                  className="text-left transition hover:text-[#9d3733]"
+                >
+                  Gallery
+                </button>
                 <a href="#" className="transition hover:text-[#9d3733]">
                   Careers
                 </a>

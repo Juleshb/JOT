@@ -20,11 +20,11 @@ export default function AdminOverview({ darkMode, overview, onNavigateSection })
   return (
     <>
       <header>
-        <h2 className="font-brand text-2xl font-bold">Overview</h2>
+        <h2 className="font-brand text-xl font-bold sm:text-2xl">Overview</h2>
         <p className="mt-1 text-sm opacity-80">Platform health and statistics at a glance.</p>
       </header>
 
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="grid grid-cols-2 gap-3 sm:gap-4 xl:grid-cols-4">
         <StatCard
           darkMode={darkMode}
           label="Total users"
@@ -55,7 +55,7 @@ export default function AdminOverview({ darkMode, overview, onNavigateSection })
         />
       </div>
 
-      <div className="grid gap-6 lg:grid-cols-2">
+      <div className="grid gap-4 sm:gap-6 lg:grid-cols-2">
         <UsersByRoleChart byRole={byRole} darkMode={darkMode} />
         <RidesByStatusChart byStatus={byStatus} darkMode={darkMode} />
         <RidesPerDayChart ridesPerDay={ridesPerDay} darkMode={darkMode} />
@@ -63,34 +63,41 @@ export default function AdminOverview({ darkMode, overview, onNavigateSection })
       </div>
 
       <div className={cardClass}>
-        <h3 className="font-accent text-lg font-bold">Quick actions</h3>
-        <div className="mt-4 flex flex-wrap gap-2">
+        <h3 className="font-accent text-base font-bold sm:text-lg">Quick actions</h3>
+        <div className="mt-3 grid grid-cols-2 gap-2 sm:mt-4 sm:flex sm:flex-wrap">
           <button
             type="button"
             onClick={() => onNavigateSection('drivers')}
-            className="rounded-lg bg-[#9d3733] px-4 py-2 text-sm font-bold text-[#f2e3bb] transition hover:bg-[#842f2b]"
+            className="rounded-xl bg-[#9d3733] px-3 py-2.5 text-xs font-bold text-[#f2e3bb] transition hover:bg-[#842f2b] sm:px-4 sm:text-sm"
           >
             Review drivers
           </button>
           <button
             type="button"
             onClick={() => onNavigateSection('users')}
-            className="rounded-lg border border-[#9d3733]/50 px-4 py-2 text-sm font-bold text-[#9d3733] transition hover:bg-[#9d3733]/10"
+            className="rounded-xl border border-[#9d3733]/50 px-3 py-2.5 text-xs font-bold text-[#9d3733] transition hover:bg-[#9d3733]/10 sm:px-4 sm:text-sm"
           >
             Manage users
           </button>
           <button
             type="button"
             onClick={() => onNavigateSection('rides')}
-            className="rounded-lg border border-[#9d3733]/50 px-4 py-2 text-sm font-bold text-[#9d3733] transition hover:bg-[#9d3733]/10"
+            className="rounded-xl border border-[#9d3733]/50 px-3 py-2.5 text-xs font-bold text-[#9d3733] transition hover:bg-[#9d3733]/10 sm:px-4 sm:text-sm"
           >
             View rides
+          </button>
+          <button
+            type="button"
+            onClick={() => onNavigateSection('gallery')}
+            className="rounded-xl border border-[#9d3733]/50 px-3 py-2.5 text-xs font-bold text-[#9d3733] transition hover:bg-[#9d3733]/10 sm:px-4 sm:text-sm"
+          >
+            Gallery uploads
           </button>
         </div>
       </div>
 
       <div className={cardClass}>
-        <h3 className="font-accent text-lg font-bold">Latest activity</h3>
+        <h3 className="font-accent text-base font-bold sm:text-lg">Latest activity</h3>
         <p className="mt-1 text-sm opacity-80">Most recent rides system-wide.</p>
         <ul className="mt-4 space-y-2">
           {(overview?.recentRides ?? []).length === 0 ? (
@@ -99,15 +106,17 @@ export default function AdminOverview({ darkMode, overview, onNavigateSection })
             overview.recentRides.map((ride) => (
               <li
                 key={ride.id}
-                className={`flex flex-wrap items-center gap-2 rounded-lg border px-3 py-2.5 text-sm ${
+                className={`flex flex-col gap-1.5 rounded-xl border px-3 py-2.5 text-sm sm:flex-row sm:flex-wrap sm:items-center sm:gap-2 ${
                   darkMode ? 'border-[#9d3733]/30' : 'border-[#9d3733]/20'
                 }`}
               >
-                <StatusBadge status={ride.status} />
-                <span className="font-medium">{ride.rider?.name ?? 'Rider'}</span>
-                <span className="opacity-40">→</span>
-                <span>{ride.driver?.name ?? 'Unassigned'}</span>
-                <span className="w-full text-xs opacity-70 sm:ml-auto sm:w-auto">{ride.pickupAddress}</span>
+                <div className="flex flex-wrap items-center gap-2">
+                  <StatusBadge status={ride.status} />
+                  <span className="font-medium">{ride.rider?.name ?? 'Rider'}</span>
+                  <span className="opacity-40">→</span>
+                  <span>{ride.driver?.name ?? 'Unassigned'}</span>
+                </div>
+                <span className="text-xs opacity-70 sm:ml-auto">{ride.pickupAddress}</span>
               </li>
             ))
           )}

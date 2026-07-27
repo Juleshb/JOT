@@ -1,11 +1,11 @@
 export function adminShellClass(darkMode) {
-  return `min-h-[calc(100dvh-5rem)] px-4 pb-20 pt-24 md:px-6 md:pt-28 ${
+  return `min-h-[calc(100dvh-5rem)] px-3 pb-24 pt-20 sm:px-4 sm:pb-20 md:px-6 md:pt-28 ${
     darkMode ? 'bg-[#0a0a0a] text-[#f2e3bb]' : 'bg-[#fffbf5] text-[#2d100f]'
   }`
 }
 
 export function adminCardClass(darkMode) {
-  return `rounded-2xl border p-5 md:p-6 ${
+  return `rounded-2xl border p-4 sm:p-5 md:p-6 ${
     darkMode ? 'border-[#9d3733]/40 bg-[#111]' : 'border-[#9d3733]/30 bg-[#fff8eb]'
   }`
 }
@@ -32,6 +32,7 @@ export const ADMIN_NAV = [
   { id: 'drivers', label: 'Drivers', path: '/admin/drivers', icon: '◇' },
   { id: 'live-map', label: 'Live map', path: '/admin/map', icon: '⊞' },
   { id: 'rides', label: 'Rides', path: '/admin/rides', icon: '▣' },
+  { id: 'gallery', label: 'Gallery', path: '/admin/gallery', icon: '▦' },
 ]
 
 export function getAdminDriverId(pathname) {
@@ -45,6 +46,7 @@ export function getAdminSection(pathname) {
   if (pathname === '/admin/drivers') return 'drivers'
   if (pathname === '/admin/map') return 'live-map'
   if (pathname === '/admin/rides') return 'rides'
+  if (pathname === '/admin/gallery') return 'gallery'
   return 'overview'
 }
 

@@ -49,8 +49,24 @@ model User {
   updatedAt    DateTime @updatedAt
 
   driverProfile DriverProfile?
-  ridesAsRider  Ride[]        @relation("RiderRides")
-  ridesAsDriver Ride[]        @relation("DriverRides")
+  ridesAsRider  Ride[]         @relation("RiderRides")
+  ridesAsDriver Ride[]         @relation("DriverRides")
+  galleryImages GalleryImage[]
+}
+
+/** Admin-uploaded images for the marketing / ops gallery. */
+model GalleryImage {
+  id           String   @id @default(cuid())
+  url          String
+  fileName     String
+  description  String?
+  mimeType     String
+  sizeBytes    Int
+  uploadedById String
+  uploadedBy   User     @relation(fields: [uploadedById], references: [id], onDelete: Cascade)
+  createdAt    DateTime @default(now())
+
+  @@index([createdAt])
 }
 
 model DriverProfile {
