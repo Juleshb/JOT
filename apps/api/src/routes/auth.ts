@@ -204,4 +204,40 @@ router.patch('/me', requireAuth, async (req, res, next) => {
   }
 });
 
+const changePasswordSchema = z.object({
+  currentPassword: z.string().min(1),
+  newPassword: z.string().min(8).max(128),
+});
+
+router.post('/me/password', requireAuth, async (req, res, next) => {
+  try {
+    const { userId } = req as AuthedRequest;
+    const body = changePasswordSchema.parse(req.body);
+
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user) {
+      throw new HttpError(404, 'User not found');
+    }
+
+    const ok = await bcrypt.compare(body.currentPassword, user.passwordHash);
+    if (!ok) {
+      throw new HttpError(400, 'Current password is incorrect');
+    }
+
+    if (body.currentPassword === body.newPassword) {
+      throw new HttpError(400, 'New password must be different from the current password');
+    }
+
+    const passwordHash = await bcrypt.hash(body.newPassword, 12);
+    await prisma.user.update({
+      where: { id: userId },
+      data: { passwordHash },
+    });
+
+    res.json({ ok: true });
+  } catch (e) {
+    next(e);
+  }
+});
+
 export default router;

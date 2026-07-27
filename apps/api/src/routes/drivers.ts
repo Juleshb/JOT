@@ -85,4 +85,36 @@ router.patch('/me/status', requireAuth, requireRole('DRIVER'), async (req, res, 
   }
 });
 
+const vehicleSchema = z.object({
+  make: z.string().min(1).max(60),
+  model: z.string().min(1).max(60),
+  color: z.string().min(1).max(40),
+  licensePlate: z.string().min(1).max(20),
+});
+
+router.patch('/me/vehicle', requireAuth, requireRole('DRIVER'), async (req, res, next) => {
+  try {
+    const body = vehicleSchema.parse(req.body);
+    const { userId } = req as AuthedRequest;
+    const profile = await prisma.driverProfile.findUnique({ where: { userId } });
+    if (!profile) {
+      throw new HttpError(404, 'Driver profile not found');
+    }
+
+    const updated = await prisma.driverProfile.update({
+      where: { userId },
+      data: {
+        vehicleMake: body.make.trim(),
+        vehicleModel: body.model.trim(),
+        vehicleColor: body.color.trim(),
+        licensePlate: body.licensePlate.trim().toUpperCase(),
+      },
+    });
+
+    res.json(updated);
+  } catch (e) {
+    next(e);
+  }
+});
+
 export default router;

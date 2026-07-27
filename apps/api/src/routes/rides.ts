@@ -282,7 +282,11 @@ router.get('/active', requireAuth, async (req, res, next) => {
             include: activeRideInclude,
           })
         : await prisma.ride.findFirst({
-            where: { driverId: userId, status: { in: ['ACCEPTED', 'STARTED'] } },
+            where: {
+              driverId: userId,
+              status: { in: ['REQUESTED', 'ACCEPTED', 'STARTED'] },
+            },
+            orderBy: { createdAt: 'desc' },
             include: activeRideInclude,
           });
 
@@ -469,6 +473,13 @@ router.post('/:id/start', requireAuth, requireRole('DRIVER'), async (req, res, n
       include: activeRideInclude,
     });
     emitRideUpdate(rideId, { rideId, status: 'STARTED', ride: full });
+    if (full?.riderId) {
+      emitToUser(full.riderId, 'ride:progress', {
+        rideId,
+        stage: 'TRIP_STARTED',
+        message: 'Your trip has started',
+      });
+    }
     res.json(full);
   } catch (e) {
     next(e);

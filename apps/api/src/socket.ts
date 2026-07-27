@@ -124,16 +124,33 @@ export function emitToUser(userId: string, event: string, data: unknown) {
 
 export function emitRideUpdate(rideId: string, payload: unknown) {
   io?.to(`ride:${rideId}`).emit('ride:status', payload);
-  const ride = (payload as { ride?: Parameters<typeof emitAdminRideMap>[0] })?.ride;
+  const ride = (payload as {
+    ride?: {
+      riderId?: string;
+      driverId?: string | null;
+      status?: string;
+      pickupLat?: number;
+    };
+  })?.ride;
+  // Always notify rider/driver personal rooms so updates arrive even before ride:subscribe
+  // (or after reconnect before rejoin).
+  if (ride?.riderId) {
+    emitToUser(ride.riderId, 'ride:status', payload);
+  }
+  if (ride?.driverId) {
+    emitToUser(ride.driverId, 'ride:status', payload);
+  }
   if (ride && typeof ride === 'object' && 'status' in ride && 'pickupLat' in ride) {
-    emitAdminRideMap(ride);
+    emitAdminRideMap(ride as Parameters<typeof emitAdminRideMap>[0]);
   }
 }
 
 export { emitAdminRideMap } from './lib/adminMapRide.js';
 
 export function broadcastRideOffer(driverUserIds: string[], payload: unknown) {
-  for (const id of driverUserIds) {
+  const unique = [...new Set(driverUserIds.filter(Boolean))];
+  console.log(`[socket] ride:offer to ${unique.length} driver(s)`, unique);
+  for (const id of unique) {
     io?.to(`user:${id}`).emit('ride:offer', payload);
   }
 }
