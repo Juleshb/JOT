@@ -30,6 +30,7 @@ import AdminPage from './pages/AdminPage'
 import AboutPage from './pages/AboutPage'
 import ContactPage from './pages/ContactPage'
 import GalleryPage from './pages/GalleryPage'
+import PrivacyPolicyPage from './pages/PrivacyPolicyPage'
 import usePageSeo from './hooks/usePageSeo'
 
 const pageToPath = {
@@ -41,6 +42,7 @@ const pageToPath = {
   about: '/about',
   contact: '/contact',
   gallery: '/gallery',
+  privacy: '/privacy',
 }
 
 /** Avoid losing stars when refetch returns the same ride without `rating` (race / stale `/rides/active`). */
@@ -96,6 +98,7 @@ const getPageFromPath = (pathname) => {
   if (pathname === '/about') return 'about'
   if (pathname === '/contact') return 'contact'
   if (pathname === '/gallery') return 'gallery'
+  if (pathname === '/privacy') return 'privacy'
   return 'home'
 }
 
@@ -2590,6 +2593,8 @@ function App() {
         <GalleryPage navigateToPage={navigateToPage} />
       ) : activePage === 'contact' ? (
         <ContactPage navigateToPage={navigateToPage} />
+      ) : activePage === 'privacy' ? (
+        <PrivacyPolicyPage navigateToPage={navigateToPage} />
       ) : (
         <>
       <div className="text-[#2d100f]">
@@ -3139,7 +3144,8 @@ function App() {
       {(activePage === 'home' ||
         activePage === 'about' ||
         activePage === 'gallery' ||
-        activePage === 'contact') && (
+        activePage === 'contact' ||
+        activePage === 'privacy') && (
       <footer
         id="site-footer"
         className={`scroll-mt-28 border-t transition-colors duration-300 ${
@@ -3309,7 +3315,14 @@ function App() {
           >
             <p>2026 JO Transportation. All rights reserved.</p>
             <div className="flex items-center gap-4">
-              <a href="#" className="transition hover:text-[#9d3733]">
+              <a
+                href="/privacy"
+                onClick={(e) => {
+                  e.preventDefault()
+                  navigateToPage('privacy')
+                }}
+                className="transition hover:text-[#9d3733]"
+              >
                 Privacy
               </a>
               <a href="#" className="transition hover:text-[#9d3733]">

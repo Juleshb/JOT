@@ -5,7 +5,7 @@ const DEFAULT_DESCRIPTION =
 
 const DEFAULT_OG_IMAGE = '/welcome-hero.png'
 
-export const PUBLIC_INDEXABLE_PATHS = ['/', '/about', '/contact', '/gallery', '/ride']
+export const PUBLIC_INDEXABLE_PATHS = ['/', '/about', '/contact', '/gallery', '/ride', '/privacy']
 
 export const PAGE_SEO = {
   home: {
@@ -28,6 +28,13 @@ export const PAGE_SEO = {
     path: '/contact',
     index: true,
   },
+  privacy: {
+    title: 'Privacy Policy | JO Transportation',
+    description:
+      'Read how JO Transportation collects, uses, and protects personal information for ride booking, location, payments, and account services.',
+    path: '/privacy',
+    index: true,
+  },
   gallery: {
     title: 'Gallery | JO Transportation',
     description:
@@ -35,6 +42,7 @@ export const PAGE_SEO = {
     path: '/gallery',
     index: true,
   },
+
   rider: {
     title: 'Book a Ride | JO Transportation',
     description:
