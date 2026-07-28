@@ -83,20 +83,24 @@ export async function clearPushToken(token: string): Promise<void> {
 
 /** Send the same notification to one or more users (by id). Fire-and-forget safe. */
 export async function sendPushToUsers(userIds: string[], message: PushMessage): Promise<void> {
-  const targets = await tokensForUsers(userIds);
-  if (targets.length === 0) return;
+  try {
+    const targets = await tokensForUsers(userIds);
+    if (targets.length === 0) return;
 
-  const messages = targets.map(({ token }) => ({
-    to: token,
-    title: message.title,
-    body: message.body,
-    data: message.data ?? {},
-    sound: message.sound === null ? undefined : (message.sound ?? 'default'),
-    channelId: message.channelId ?? 'rides',
-    priority: 'high',
-  }));
+    const messages = targets.map(({ token }) => ({
+      to: token,
+      title: message.title,
+      body: message.body,
+      data: message.data ?? {},
+      sound: message.sound === null ? undefined : (message.sound ?? 'default'),
+      channelId: message.channelId ?? 'rides',
+      priority: 'high',
+    }));
 
-  await postExpoPush(messages);
+    await postExpoPush(messages);
+  } catch (e) {
+    console.warn('[push] sendPushToUsers failed:', e instanceof Error ? e.message : e);
+  }
 }
 
 export function pushNewRideOffer(opts: {
