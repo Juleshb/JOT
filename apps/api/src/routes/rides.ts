@@ -3,6 +3,15 @@ import { z } from 'zod';
 
 import { HttpError } from '../lib/httpError.js';
 import { prisma } from '../lib/prisma.js';
+import {
+  pushNewRideOffer,
+  pushRideAccepted,
+  pushRideCancelled,
+  pushRideCompleted,
+  pushRideLocationUpdated,
+  pushRideRated,
+  pushRideStarted,
+} from '../lib/push.js';
 import { getStripeClient } from '../lib/stripe.js';
 import {
   broadcastRideOffer,
@@ -223,6 +232,12 @@ router.post('/', requireAuth, requireRole('RIDER'), async (req, res, next) => {
       riderName: ride.rider.name,
     };
     broadcastRideOffer(driverIds, offerPayload);
+    pushNewRideOffer({
+      driverIds,
+      rideId: ride.id,
+      pickupAddress: ride.pickupAddress,
+      riderName: ride.rider.name,
+    });
     if (preferredDriverId) {
       emitToUser(userId, 'ride:progress', {
         rideId: ride.id,
@@ -383,17 +398,37 @@ router.patch('/:id/locations', requireAuth, requireRole('RIDER'), async (req, re
     if (updated.status === 'REQUESTED') {
       if (updated.driverId) {
         broadcastRideOffer([updated.driverId], offerPayload);
+        pushRideLocationUpdated({
+          driverIds: [updated.driverId],
+          rideId: updated.id,
+          pickupAddress: updated.pickupAddress,
+        });
       } else {
         const driverIds = await nearbyDriverUserIdsForPickup(body.pickupLat, body.pickupLng);
         broadcastRideOffer(driverIds, offerPayload);
+        pushRideLocationUpdated({
+          driverIds,
+          rideId: updated.id,
+          pickupAddress: updated.pickupAddress,
+        });
       }
       broadcastRideOfferUpdate({ ...offerPayload, updated: true });
     } else if (updated.status === 'ACCEPTED' && updated.driverId) {
       // During pickup navigation, push location updates directly to the assigned driver.
       emitToUser(updated.driverId, 'ride:offer_update', { ...offerPayload, updated: true });
+      pushRideLocationUpdated({
+        driverIds: [updated.driverId],
+        rideId: updated.id,
+        pickupAddress: updated.pickupAddress,
+      });
     } else {
       const driverIds = await nearbyDriverUserIdsForPickup(body.pickupLat, body.pickupLng);
       broadcastRideOffer(driverIds, offerPayload);
+      pushRideLocationUpdated({
+        driverIds,
+        rideId: updated.id,
+        pickupAddress: updated.pickupAddress,
+      });
     }
     emitRideUpdate(updated.id, { rideId: updated.id, status: updated.status, ride: updated });
     res.json(updated);
@@ -447,6 +482,11 @@ router.post('/:id/accept', requireAuth, requireRole('DRIVER'), async (req, res, 
         stage: 'DRIVER_EN_ROUTE',
         message: 'Driver en route to pickup',
       });
+      pushRideAccepted({
+        riderId: ride.riderId,
+        rideId: ride.id,
+        driverName: ride.driver?.name,
+      });
     }
     res.json(ride);
   } catch (e) {
@@ -479,6 +519,7 @@ router.post('/:id/start', requireAuth, requireRole('DRIVER'), async (req, res, n
         stage: 'TRIP_STARTED',
         message: 'Your trip has started',
       });
+      pushRideStarted({ riderId: full.riderId, rideId });
     }
     res.json(full);
   } catch (e) {
@@ -628,6 +669,20 @@ router.post('/:id/rate', requireAuth, requireRole('RIDER'), async (req, res, nex
 
     if (full) {
       emitRideUpdate(rideId, { rideId, status: full.status, ride: full });
+      if (full.driverId && full.rating) {
+        emitToUser(full.driverId, 'ride:rated', {
+          rideId: full.id,
+          stars: full.rating.stars,
+          riderName: full.rider?.name,
+          ride: full,
+        });
+        pushRideRated({
+          driverId: full.driverId,
+          rideId: full.id,
+          stars: full.rating.stars,
+          riderName: full.rider?.name,
+        });
+      }
     }
     res.json(full);
   } catch (e) {
@@ -654,11 +709,27 @@ router.post('/:id/complete', requireAuth, requireRole('DRIVER'), async (req, res
     if (ride.count === 0) {
       throw new HttpError(404, 'Ride not found or not in STARTED state');
     }
+    // If no fareFinal was sent, lock in the estimate so earnings reports stay accurate.
+    if (body.fareFinal == null) {
+      const current = await prisma.ride.findUnique({
+        where: { id: rideId },
+        select: { fareFinal: true, fareEstimate: true },
+      });
+      if (current && current.fareFinal == null && current.fareEstimate != null) {
+        await prisma.ride.update({
+          where: { id: rideId },
+          data: { fareFinal: current.fareEstimate },
+        });
+      }
+    }
     const full = await prisma.ride.findUnique({
       where: { id: rideId },
       include: activeRideInclude,
     });
     emitRideUpdate(rideId, { rideId, status: 'COMPLETED', ride: full });
+    if (full?.riderId) {
+      pushRideCompleted({ riderId: full.riderId, rideId });
+    }
     res.json(full);
   } catch (e) {
     next(e);
@@ -700,6 +771,20 @@ router.post('/:id/cancel', requireAuth, async (req, res, next) => {
       },
     });
     emitRideUpdate(rideId, { rideId, status: 'CANCELLED', ride: updated });
+    const notifyIds: string[] = [];
+    if (role === 'RIDER' && updated.driverId) {
+      notifyIds.push(updated.driverId);
+    } else if (role === 'DRIVER') {
+      notifyIds.push(updated.riderId);
+    } else {
+      if (updated.riderId !== userId) notifyIds.push(updated.riderId);
+      if (updated.driverId && updated.driverId !== userId) notifyIds.push(updated.driverId);
+    }
+    pushRideCancelled({
+      userIds: notifyIds,
+      rideId,
+      cancelledBy: role === 'RIDER' ? 'rider' : role === 'DRIVER' ? 'driver' : 'system',
+    });
     res.json(updated);
   } catch (e) {
     next(e);

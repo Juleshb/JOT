@@ -45,6 +45,10 @@ model User {
   phone        String?
   avatarUrl    String?
   role         UserRole
+  /** Expo push token (ExponentPushToken[...]) for remote notifications when the app is backgrounded. */
+  expoPushToken String?
+  pushPlatform  String?
+  pushTokenUpdatedAt DateTime?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
@@ -52,6 +56,8 @@ model User {
   ridesAsRider  Ride[]         @relation("RiderRides")
   ridesAsDriver Ride[]         @relation("DriverRides")
   galleryImages GalleryImage[]
+
+  @@index([expoPushToken])
 }
 
 /** Admin-uploaded images for the marketing / ops gallery. */

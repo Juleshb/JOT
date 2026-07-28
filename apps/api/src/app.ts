@@ -8,6 +8,7 @@ import { HttpError } from './lib/httpError.js';
 import adminRoutes from './routes/admin.js';
 import authRoutes from './routes/auth.js';
 import contactRoutes from './routes/contact.js';
+import deviceRoutes from './routes/devices.js';
 import driverRoutes from './routes/drivers.js';
 import galleryRoutes from './routes/gallery.js';
 import paymentRoutes from './routes/payments.js';
@@ -29,6 +30,7 @@ app.get('/health', (_req, res) => {
 
 app.use('/auth', authRoutes);
 app.use('/contact', contactRoutes);
+app.use('/devices', deviceRoutes);
 app.use('/admin', adminRoutes);
 app.use('/gallery', galleryRoutes);
 app.use('/drivers', driverRoutes);

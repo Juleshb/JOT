@@ -85,6 +85,95 @@ router.patch('/me/status', requireAuth, requireRole('DRIVER'), async (req, res, 
   }
 });
 
+function startOfLocalDay(d = new Date()): Date {
+  const x = new Date(d);
+  x.setHours(0, 0, 0, 0);
+  return x;
+}
+
+function startOfLocalWeek(d = new Date()): Date {
+  const x = startOfLocalDay(d);
+  const day = x.getDay(); // 0 Sun … 6 Sat
+  const diff = day === 0 ? 6 : day - 1; // Monday start
+  x.setDate(x.getDate() - diff);
+  return x;
+}
+
+function startOfLocalMonth(d = new Date()): Date {
+  return new Date(d.getFullYear(), d.getMonth(), 1);
+}
+
+function rideEarnedAmount(ride: { fareFinal: number | null; fareEstimate: number | null }): number {
+  const amount = ride.fareFinal ?? ride.fareEstimate;
+  return typeof amount === 'number' && Number.isFinite(amount) ? amount : 0;
+}
+
+function roundMoney(n: number): number {
+  return Math.round(n * 100) / 100;
+}
+
+/** Driver earnings report from completed trips. */
+router.get('/me/earnings', requireAuth, requireRole('DRIVER'), async (req, res, next) => {
+  try {
+    const { userId } = req as AuthedRequest;
+    const rides = await prisma.ride.findMany({
+      where: {
+        driverId: userId,
+        status: 'COMPLETED',
+      },
+      select: {
+        id: true,
+        fareFinal: true,
+        fareEstimate: true,
+        completedAt: true,
+        createdAt: true,
+        paymentMethod: true,
+      },
+      orderBy: { completedAt: 'desc' },
+    });
+
+    const now = new Date();
+    const dayStart = startOfLocalDay(now);
+    const weekStart = startOfLocalWeek(now);
+    const monthStart = startOfLocalMonth(now);
+
+    let totalEarned = 0;
+    let todayEarned = 0;
+    let weekEarned = 0;
+    let monthEarned = 0;
+    let cashEarned = 0;
+    let cardEarned = 0;
+
+    for (const ride of rides) {
+      const amount = rideEarnedAmount(ride);
+      totalEarned += amount;
+      const when = ride.completedAt ?? ride.createdAt;
+      if (when >= dayStart) todayEarned += amount;
+      if (when >= weekStart) weekEarned += amount;
+      if (when >= monthStart) monthEarned += amount;
+      if (ride.paymentMethod === 'CARD') cardEarned += amount;
+      else cashEarned += amount;
+    }
+
+    const completedTrips = rides.length;
+    res.json({
+      currency: 'USD',
+      completedTrips,
+      totalEarned: roundMoney(totalEarned),
+      todayEarned: roundMoney(todayEarned),
+      weekEarned: roundMoney(weekEarned),
+      monthEarned: roundMoney(monthEarned),
+      averagePerTrip: completedTrips > 0 ? roundMoney(totalEarned / completedTrips) : 0,
+      byPaymentMethod: {
+        cash: roundMoney(cashEarned),
+        card: roundMoney(cardEarned),
+      },
+    });
+  } catch (e) {
+    next(e);
+  }
+});
+
 const vehicleSchema = z.object({
   make: z.string().min(1).max(60),
   model: z.string().min(1).max(60),
