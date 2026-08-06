@@ -122,7 +122,13 @@ router.post('/google', async (req, res, next) => {
 
 const googleCodeSchema = z.object({
   code: z.string().min(1),
-  redirectUri: z.string().url(),
+  // Expo auth proxy only (https://auth.expo.io/…). Native custom schemes are rejected in exchangeGoogleAuthCode.
+  redirectUri: z
+    .string()
+    .url()
+    .refine((u) => u.startsWith('https://'), {
+      message: 'redirectUri must be an https Expo auth proxy URL',
+    }),
 });
 
 /** Mobile / Expo Go: exchange OAuth authorization code for a session (requires GOOGLE_CLIENT_SECRET). */

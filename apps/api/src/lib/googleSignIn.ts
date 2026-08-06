@@ -1,14 +1,24 @@
 import { randomUUID } from 'node:crypto';
 import bcrypt from 'bcryptjs';
-import type { TokenPayload } from 'google-auth-library';
 import { OAuth2Client } from 'google-auth-library';
+import { createRemoteJWKSet, jwtVerify, type JWTPayload } from 'jose';
 
 import { getGoogleClientIds } from './googleAuth.js';
 import { HttpError } from './httpError.js';
 import { signToken } from './jwt.js';
 import { prisma } from './prisma.js';
 
-const googleClient = new OAuth2Client();
+/** Subset of Google ID token claims we use after verification. */
+export type GoogleIdTokenPayload = {
+  sub?: string;
+  email?: string;
+  email_verified?: boolean | string;
+  name?: string;
+  picture?: string;
+};
+
+const GOOGLE_ISSUERS = ['https://accounts.google.com', 'accounts.google.com'];
+const googleJwks = createRemoteJWKSet(new URL('https://www.googleapis.com/oauth2/v3/certs'));
 
 export function publicUser(user: {
   id: string;
@@ -43,42 +53,33 @@ function peekJwtAud(idToken: string): string | null {
   }
 }
 
-export async function verifyGoogleIdToken(idToken: string): Promise<TokenPayload> {
+function sanitizeVerifyError(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err);
+  // Never leak Google HTML error pages into API responses.
+  if (raw.includes('<!DOCTYPE') || raw.includes('<html') || raw.includes('Failed to retrieve verification certificates')) {
+    return 'could not reach Google to verify the token (network/proxy blocked googleapis.com)';
+  }
+  if (raw.length > 180) return `${raw.slice(0, 180)}…`;
+  return raw;
+}
+
+function toGooglePayload(payload: JWTPayload): GoogleIdTokenPayload {
+  return {
+    sub: typeof payload.sub === 'string' ? payload.sub : undefined,
+    email: typeof payload.email === 'string' ? payload.email : undefined,
+    email_verified: payload.email_verified as boolean | string | undefined,
+    name: typeof payload.name === 'string' ? payload.name : undefined,
+    picture: typeof payload.picture === 'string' ? payload.picture : undefined,
+  };
+}
+
+export async function verifyGoogleIdToken(idToken: string): Promise<GoogleIdTokenPayload> {
   const googleClientIds = getGoogleClientIds();
   if (googleClientIds.length === 0) {
     throw new HttpError(500, 'GOOGLE_CLIENT_ID is not configured');
   }
 
   const aud = peekJwtAud(idToken);
-  const audiencesToTry =
-    aud && googleClientIds.includes(aud)
-      ? [aud, ...googleClientIds.filter((id) => id !== aud)]
-      : googleClientIds;
-
-  let lastError: unknown;
-  for (const audience of audiencesToTry) {
-    try {
-      const ticket = await googleClient.verifyIdToken({
-        idToken,
-        audience,
-      });
-      const payload = ticket.getPayload();
-      if (!payload) {
-        throw new HttpError(401, 'Invalid Google sign-in token');
-      }
-      return payload;
-    } catch (e) {
-      if (e instanceof HttpError) throw e;
-      lastError = e;
-    }
-  }
-
-  console.error('[google] verifyIdToken failed', {
-    tokenAud: aud,
-    allowedAudiences: googleClientIds,
-    message: lastError instanceof Error ? lastError.message : String(lastError),
-  });
-
   if (aud && !googleClientIds.includes(aud)) {
     throw new HttpError(
       401,
@@ -86,11 +87,32 @@ export async function verifyGoogleIdToken(idToken: string): Promise<TokenPayload
     );
   }
 
-  const detail = lastError instanceof Error ? lastError.message : 'verification failed';
-  throw new HttpError(401, `Invalid Google sign-in token (${detail})`);
+  try {
+    const verified = await jwtVerify(idToken, googleJwks, {
+      issuer: GOOGLE_ISSUERS,
+      audience: googleClientIds.length === 1 ? googleClientIds[0] : googleClientIds,
+    });
+    return toGooglePayload(verified.payload);
+  } catch (e) {
+    console.error('[google] verifyIdToken failed', {
+      tokenAud: aud,
+      allowedAudiences: googleClientIds,
+      message: e instanceof Error ? e.message : String(e),
+    });
+    throw new HttpError(401, `Invalid Google sign-in token (${sanitizeVerifyError(e)})`);
+  }
 }
 
 export async function exchangeGoogleAuthCode(code: string, redirectUri: string): Promise<string> {
+  // Installed-app redirects (com.googleusercontent.apps…:/oauthredirect) must never be
+  // exchanged with the Web client secret — only the Expo HTTPS proxy uses this path.
+  if (!redirectUri.startsWith('https://')) {
+    throw new HttpError(
+      400,
+      'Google code exchange is only supported for the Expo auth proxy (https://). Native iOS/Android must send an id_token to POST /auth/google.',
+    );
+  }
+
   const secret = process.env.GOOGLE_CLIENT_SECRET?.trim();
   if (!secret) {
     throw new HttpError(
@@ -130,8 +152,8 @@ export async function exchangeGoogleAuthCode(code: string, redirectUri: string):
   }
 }
 
-export async function signInWithGooglePayload(payload: TokenPayload) {
-  const verifiedRaw = (payload as { email_verified?: boolean | string }).email_verified;
+export async function signInWithGooglePayload(payload: GoogleIdTokenPayload) {
+  const verifiedRaw = payload.email_verified;
   const emailVerified = verifiedRaw === true || verifiedRaw === 'true';
   if (!payload.email || !emailVerified) {
     throw new HttpError(401, 'Google account email is not verified');
