@@ -49,41 +49,45 @@ export async function verifyGoogleIdToken(idToken: string): Promise<TokenPayload
     throw new HttpError(500, 'GOOGLE_CLIENT_ID is not configured');
   }
 
-  try {
-    const ticket = await googleClient.verifyIdToken({
-      idToken,
-      audience: googleClientIds.length === 1 ? googleClientIds[0] : googleClientIds,
-    });
-    const payload = ticket.getPayload();
-    if (!payload) {
-      throw new HttpError(401, 'Invalid Google sign-in token');
-    }
-    return payload;
-  } catch (e) {
-    if (e instanceof HttpError) {
-      throw e;
-    }
+  const aud = peekJwtAud(idToken);
+  const audiencesToTry =
+    aud && googleClientIds.includes(aud)
+      ? [aud, ...googleClientIds.filter((id) => id !== aud)]
+      : googleClientIds;
 
-    const aud = peekJwtAud(idToken);
-    const allowed = googleClientIds.join(', ');
-    console.error('[google] verifyIdToken failed', {
-      tokenAud: aud,
-      allowedAudiences: googleClientIds,
-      message: e instanceof Error ? e.message : String(e),
-    });
-
-    if (aud && !googleClientIds.includes(aud)) {
-      throw new HttpError(
-        401,
-        `Invalid Google sign-in token: audience mismatch (token was issued for a client ID not listed in GOOGLE_CLIENT_ID on the API). Token aud=${aud}`,
-      );
+  let lastError: unknown;
+  for (const audience of audiencesToTry) {
+    try {
+      const ticket = await googleClient.verifyIdToken({
+        idToken,
+        audience,
+      });
+      const payload = ticket.getPayload();
+      if (!payload) {
+        throw new HttpError(401, 'Invalid Google sign-in token');
+      }
+      return payload;
+    } catch (e) {
+      if (e instanceof HttpError) throw e;
+      lastError = e;
     }
+  }
 
+  console.error('[google] verifyIdToken failed', {
+    tokenAud: aud,
+    allowedAudiences: googleClientIds,
+    message: lastError instanceof Error ? lastError.message : String(lastError),
+  });
+
+  if (aud && !googleClientIds.includes(aud)) {
     throw new HttpError(
       401,
-      `Invalid Google sign-in token. API accepts: ${allowed || '(none)'}`,
+      `Invalid Google sign-in token: audience mismatch. Token aud=${aud}`,
     );
   }
+
+  const detail = lastError instanceof Error ? lastError.message : 'verification failed';
+  throw new HttpError(401, `Invalid Google sign-in token (${detail})`);
 }
 
 export async function exchangeGoogleAuthCode(code: string, redirectUri: string): Promise<string> {
@@ -127,7 +131,9 @@ export async function exchangeGoogleAuthCode(code: string, redirectUri: string):
 }
 
 export async function signInWithGooglePayload(payload: TokenPayload) {
-  if (!payload.email || payload.email_verified !== true) {
+  const verifiedRaw = (payload as { email_verified?: boolean | string }).email_verified;
+  const emailVerified = verifiedRaw === true || verifiedRaw === 'true';
+  if (!payload.email || !emailVerified) {
     throw new HttpError(401, 'Google account email is not verified');
   }
 
