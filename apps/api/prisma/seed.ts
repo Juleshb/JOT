@@ -5,7 +5,7 @@ import bcrypt from 'bcryptjs';
 
 const prisma = new PrismaClient();
 
-async function main() {
+async function upsertAdmin() {
   const email = process.env.ADMIN_SEED_EMAIL?.trim().toLowerCase();
   const password = process.env.ADMIN_SEED_PASSWORD;
   const name = process.env.ADMIN_SEED_NAME?.trim() || 'Admin';
@@ -42,6 +42,47 @@ async function main() {
     },
   });
   console.info(`Created admin user ${email}.`);
+}
+
+/** App Review demo rider — document these credentials in App Store Connect notes. */
+async function upsertDemoRider() {
+  const email = (
+    process.env.DEMO_RIDER_EMAIL?.trim() || 'reviewer@jotransportation.online'
+  ).toLowerCase();
+  const password = process.env.DEMO_RIDER_PASSWORD?.trim() || 'ReviewDemo2026!';
+  const name = process.env.DEMO_RIDER_NAME?.trim() || 'App Review Rider';
+
+  const passwordHash = await bcrypt.hash(password, 12);
+  const existing = await prisma.user.findUnique({ where: { email } });
+
+  if (existing) {
+    await prisma.user.update({
+      where: { id: existing.id },
+      data: {
+        passwordHash,
+        name,
+        role: 'RIDER',
+      },
+    });
+    console.info(`Updated App Review demo rider ${email}.`);
+    return;
+  }
+
+  await prisma.user.create({
+    data: {
+      email,
+      passwordHash,
+      name,
+      role: 'RIDER',
+      phone: '+12145550100',
+    },
+  });
+  console.info(`Created App Review demo rider ${email}.`);
+}
+
+async function main() {
+  await upsertAdmin();
+  await upsertDemoRider();
 }
 
 main()

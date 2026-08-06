@@ -26,6 +26,23 @@ export function publicUser(user: {
   };
 }
 
+/** Best-effort decode of JWT payload (no verify) — used only for clearer errors. */
+function peekJwtAud(idToken: string): string | null {
+  try {
+    const part = idToken.split('.')[1];
+    if (!part) return null;
+    const json = Buffer.from(part.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString(
+      'utf8',
+    );
+    const payload = JSON.parse(json) as { aud?: string | string[] };
+    if (typeof payload.aud === 'string') return payload.aud;
+    if (Array.isArray(payload.aud) && payload.aud[0]) return String(payload.aud[0]);
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 export async function verifyGoogleIdToken(idToken: string): Promise<TokenPayload> {
   const googleClientIds = getGoogleClientIds();
   if (googleClientIds.length === 0) {
@@ -46,7 +63,26 @@ export async function verifyGoogleIdToken(idToken: string): Promise<TokenPayload
     if (e instanceof HttpError) {
       throw e;
     }
-    throw new HttpError(401, 'Invalid Google sign-in token');
+
+    const aud = peekJwtAud(idToken);
+    const allowed = googleClientIds.join(', ');
+    console.error('[google] verifyIdToken failed', {
+      tokenAud: aud,
+      allowedAudiences: googleClientIds,
+      message: e instanceof Error ? e.message : String(e),
+    });
+
+    if (aud && !googleClientIds.includes(aud)) {
+      throw new HttpError(
+        401,
+        `Invalid Google sign-in token: audience mismatch (token was issued for a client ID not listed in GOOGLE_CLIENT_ID on the API). Token aud=${aud}`,
+      );
+    }
+
+    throw new HttpError(
+      401,
+      `Invalid Google sign-in token. API accepts: ${allowed || '(none)'}`,
+    );
   }
 }
 
@@ -77,7 +113,16 @@ export async function exchangeGoogleAuthCode(code: string, redirectUri: string):
     if (e instanceof HttpError) {
       throw e;
     }
-    throw new HttpError(401, 'Could not complete Google sign-in');
+    console.error('[google] code exchange failed', {
+      redirectUri,
+      webClientId,
+      message: e instanceof Error ? e.message : String(e),
+    });
+    throw new HttpError(
+      401,
+      'Could not complete Google sign-in. Check GOOGLE_CLIENT_SECRET and that this redirect URI is authorized on the Web OAuth client: ' +
+        redirectUri,
+    );
   }
 }
 

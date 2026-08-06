@@ -45,6 +45,8 @@ model User {
   phone        String?
   avatarUrl    String?
   role         UserRole
+  /** Apple Sign In subject (`sub`) when the user signed in with Apple. */
+  appleSub     String?  @unique
   /** Expo push token (ExponentPushToken[...]) for remote notifications when the app is backgrounded. */
   expoPushToken String?
   pushPlatform  String?

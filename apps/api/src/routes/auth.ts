@@ -1,8 +1,8 @@
 import { Router } from 'express';
-import { randomUUID } from 'node:crypto';
 import bcrypt from 'bcryptjs';
 import { z } from 'zod';
 
+import { signInWithApple } from '../lib/appleAuthSession.js';
 import { HttpError } from '../lib/httpError.js';
 import { signToken } from '../lib/jwt.js';
 import {
@@ -138,6 +138,27 @@ router.post('/google/code', async (req, res, next) => {
   }
 });
 
+const appleLoginSchema = z.object({
+  identityToken: z.string().min(1),
+  email: z.string().email().optional().nullable(),
+  fullName: z.string().max(120).optional().nullable(),
+});
+
+/** Sign in with Apple (required when Google login is offered — App Store 4.8). */
+router.post('/apple', async (req, res, next) => {
+  try {
+    const body = appleLoginSchema.parse(req.body);
+    const session = await signInWithApple({
+      identityToken: body.identityToken,
+      email: body.email,
+      fullName: body.fullName,
+    });
+    res.json(session);
+  } catch (e) {
+    next(e);
+  }
+});
+
 router.get('/me', requireAuth, async (req, res, next) => {
   try {
     const { userId } = req as AuthedRequest;
@@ -232,6 +253,51 @@ router.post('/me/password', requireAuth, async (req, res, next) => {
     await prisma.user.update({
       where: { id: userId },
       data: { passwordHash },
+    });
+
+    res.json({ ok: true });
+  } catch (e) {
+    next(e);
+  }
+});
+
+/**
+ * Permanently delete the authenticated account and related rider data (App Store 5.1.1).
+ * Active trips are cancelled first; driver rides they were assigned are detached via cascade rules.
+ */
+router.delete('/me', requireAuth, async (req, res, next) => {
+  try {
+    const { userId } = req as AuthedRequest;
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      include: { driverProfile: true },
+    });
+    if (!user) {
+      throw new HttpError(404, 'User not found');
+    }
+
+    await prisma.$transaction(async (tx) => {
+      await tx.ride.updateMany({
+        where: {
+          OR: [
+            { riderId: userId, status: { in: ['REQUESTED', 'ACCEPTED', 'STARTED'] } },
+            { driverId: userId, status: { in: ['REQUESTED', 'ACCEPTED', 'STARTED'] } },
+          ],
+        },
+        data: {
+          status: 'CANCELLED',
+          cancelledAt: new Date(),
+        },
+      });
+
+      if (user.driverProfile) {
+        await tx.driverProfile.update({
+          where: { userId },
+          data: { isOnline: false, currentLat: null, currentLng: null },
+        });
+      }
+
+      await tx.user.delete({ where: { id: userId } });
     });
 
     res.json({ ok: true });

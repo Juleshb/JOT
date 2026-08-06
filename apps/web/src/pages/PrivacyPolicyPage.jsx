@@ -16,7 +16,7 @@ const sections = [
     id: 'information-we-collect',
     title: '2. Information we collect',
     body: [
-      'Account information. When you create an account or sign in, we may collect your name, email address, phone number, password (stored in hashed form), and profile details you choose to provide. If you use Google Sign-In, we receive limited account information from Google (such as your name and email) as permitted by your Google settings.',
+      'Account information. When you create an account or sign in, we may collect your name, email address, phone number, password (stored in hashed form), and profile details you choose to provide. If you use Google Sign-In or Sign in with Apple, we receive limited account information from that provider (such as your name and email, or a private relay email from Apple) as permitted by your settings.',
       'Location information. To request rides, match riders and drivers, show maps, estimate routes and fares, and track active trips, we collect precise location data from your device when you grant permission. You can turn location access off in your device settings, but some features will not work without it.',
       'Trip and usage information. We collect pickup and drop-off details, route and fare estimates, ride status, ratings, and history needed to operate and improve the Services.',
       'Payment information. When you pay for a ride, payment card details are processed by our payment provider (for example, Stripe). We do not store your full card number on our servers. We may receive payment status, limited billing metadata, and transaction identifiers.',
@@ -47,7 +47,7 @@ const sections = [
     ],
     bullets: [
       'With drivers and riders as needed to complete a trip (for example, first name, pickup location, and trip status)',
-      'With service providers who help us operate the Services, including hosting, maps and location services (such as Google Maps / Places or Mapbox), authentication (Google), payments (Stripe), email delivery, and analytics or error monitoring when enabled',
+      'With service providers who help us operate the Services, including hosting, maps and location services (such as Google Maps / Places or Mapbox), authentication (Google and Sign in with Apple), payments (Stripe), email delivery, and analytics or error monitoring when enabled',
       'When required by law, legal process, or to protect the rights, safety, and security of JO, our users, or the public',
       'In connection with a merger, acquisition, financing, or sale of assets, subject to appropriate safeguards',
     ],
@@ -70,7 +70,7 @@ const sections = [
     id: 'your-choices',
     title: '7. Your choices and rights',
     body: [
-      'Depending on where you live, you may have rights to access, correct, delete, or export certain personal information, or to object to or restrict certain processing. You can update some account details in the app or website profile settings.',
+      'Depending on where you live, you may have rights to access, correct, delete, or export certain personal information, or to object to or restrict certain processing. You can update some account details in the app or website profile settings. In the mobile app, you can permanently delete your account from Profile → Delete account. You may also email us to request deletion.',
       'To make a privacy request, email jotransportation2@gmail.com with the subject line “Privacy Request.” We may need to verify your identity before responding. You may also contact us by phone at +1 (682) 786-1241.',
       'You can withdraw location permission in your device settings at any time. Marketing communications, if any, can be opted out of using the instructions in those messages. Transactional ride and account messages may still be sent.',
     ],
