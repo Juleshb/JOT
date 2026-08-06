@@ -1,9 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import bcrypt from 'bcryptjs';
 import { OAuth2Client } from 'google-auth-library';
-import { createRemoteJWKSet, jwtVerify, type JWTPayload } from 'jose';
+import { jwtVerify, type JWTPayload } from 'jose';
 
 import { getGoogleClientIds } from './googleAuth.js';
+import {
+  getGoogleJwksVerifier,
+  googleTokenInfo,
+  refreshGoogleJwksVerifier,
+} from './googleJwks.js';
 import { HttpError } from './httpError.js';
 import { signToken } from './jwt.js';
 import { prisma } from './prisma.js';
@@ -18,7 +23,6 @@ export type GoogleIdTokenPayload = {
 };
 
 const GOOGLE_ISSUERS = ['https://accounts.google.com', 'accounts.google.com'];
-const googleJwks = createRemoteJWKSet(new URL('https://www.googleapis.com/oauth2/v3/certs'));
 
 export function publicUser(user: {
   id: string;
@@ -55,9 +59,15 @@ function peekJwtAud(idToken: string): string | null {
 
 function sanitizeVerifyError(err: unknown): string {
   const raw = err instanceof Error ? err.message : String(err);
-  // Never leak Google HTML error pages into API responses.
-  if (raw.includes('<!DOCTYPE') || raw.includes('<html') || raw.includes('Failed to retrieve verification certificates')) {
-    return 'could not reach Google to verify the token (network/proxy blocked googleapis.com)';
+  if (
+    raw.includes('<!DOCTYPE') ||
+    raw.includes('<html') ||
+    raw.includes('Failed to retrieve verification certificates') ||
+    raw.includes('Expected 200 OK from the JSON Web Key Set') ||
+    raw.includes('Google JWKS HTTP') ||
+    raw.includes('fetch failed')
+  ) {
+    return 'could not reach Google to verify the token (check API network / proxy)';
   }
   if (raw.length > 180) return `${raw.slice(0, 180)}…`;
   return raw;
@@ -70,6 +80,53 @@ function toGooglePayload(payload: JWTPayload): GoogleIdTokenPayload {
     email_verified: payload.email_verified as boolean | string | undefined,
     name: typeof payload.name === 'string' ? payload.name : undefined,
     picture: typeof payload.picture === 'string' ? payload.picture : undefined,
+  };
+}
+
+async function verifyWithJwks(
+  idToken: string,
+  audiences: string[],
+): Promise<GoogleIdTokenPayload> {
+  const verifyOpts = {
+    issuer: GOOGLE_ISSUERS,
+    audience: audiences.length === 1 ? audiences[0] : audiences,
+  };
+
+  try {
+    const jwks = await getGoogleJwksVerifier();
+    const verified = await jwtVerify(idToken, jwks, verifyOpts);
+    return toGooglePayload(verified.payload);
+  } catch (first) {
+    // Key rotation or stale cache — refresh once.
+    try {
+      const jwks = await refreshGoogleJwksVerifier();
+      const verified = await jwtVerify(idToken, jwks, verifyOpts);
+      return toGooglePayload(verified.payload);
+    } catch {
+      throw first;
+    }
+  }
+}
+
+async function verifyWithTokenInfo(
+  idToken: string,
+  audiences: string[],
+): Promise<GoogleIdTokenPayload> {
+  const info = await googleTokenInfo(idToken);
+  const aud = typeof info.aud === 'string' ? info.aud : '';
+  if (!audiences.includes(aud)) {
+    throw new Error(`tokeninfo audience mismatch: ${aud}`);
+  }
+  const iss = typeof info.iss === 'string' ? info.iss : '';
+  if (!GOOGLE_ISSUERS.includes(iss)) {
+    throw new Error(`tokeninfo issuer mismatch: ${iss}`);
+  }
+  return {
+    sub: typeof info.sub === 'string' ? info.sub : undefined,
+    email: typeof info.email === 'string' ? info.email : undefined,
+    email_verified: info.email_verified as boolean | string | undefined,
+    name: typeof info.name === 'string' ? info.name : undefined,
+    picture: typeof info.picture === 'string' ? info.picture : undefined,
   };
 }
 
@@ -88,18 +145,20 @@ export async function verifyGoogleIdToken(idToken: string): Promise<GoogleIdToke
   }
 
   try {
-    const verified = await jwtVerify(idToken, googleJwks, {
-      issuer: GOOGLE_ISSUERS,
-      audience: googleClientIds.length === 1 ? googleClientIds[0] : googleClientIds,
-    });
-    return toGooglePayload(verified.payload);
-  } catch (e) {
-    console.error('[google] verifyIdToken failed', {
-      tokenAud: aud,
-      allowedAudiences: googleClientIds,
-      message: e instanceof Error ? e.message : String(e),
-    });
-    throw new HttpError(401, `Invalid Google sign-in token (${sanitizeVerifyError(e)})`);
+    return await verifyWithJwks(idToken, googleClientIds);
+  } catch (jwksErr) {
+    try {
+      return await verifyWithTokenInfo(idToken, googleClientIds);
+    } catch (tokenInfoErr) {
+      console.error('[google] verifyIdToken failed', {
+        tokenAud: aud,
+        allowedAudiences: googleClientIds,
+        jwks: jwksErr instanceof Error ? jwksErr.message : String(jwksErr),
+        tokeninfo:
+          tokenInfoErr instanceof Error ? tokenInfoErr.message : String(tokenInfoErr),
+      });
+      throw new HttpError(401, `Invalid Google sign-in token (${sanitizeVerifyError(jwksErr)})`);
+    }
   }
 }
 
@@ -109,7 +168,7 @@ export async function exchangeGoogleAuthCode(code: string, redirectUri: string):
   if (!redirectUri.startsWith('https://')) {
     throw new HttpError(
       400,
-      'Google code exchange is only supported for the Expo auth proxy (https://). Native iOS/Android must send an id_token to POST /auth/google.',
+      'Google code exchange is only for Expo Go (https://auth.expo.io/…). On a native build, use the id_token from Google instead.',
     );
   }
 
@@ -146,7 +205,7 @@ export async function exchangeGoogleAuthCode(code: string, redirectUri: string):
     });
     throw new HttpError(
       401,
-      'Could not complete Google sign-in. Check GOOGLE_CLIENT_SECRET and that this redirect URI is authorized on the Web OAuth client: ' +
+      'Could not complete Google sign-in. Check production GOOGLE_CLIENT_SECRET matches the Web OAuth client, and that redirect URI is authorized: ' +
         redirectUri,
     );
   }

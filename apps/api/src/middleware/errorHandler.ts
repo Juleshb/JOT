@@ -7,7 +7,15 @@ import { HttpError } from '../lib/httpError.js';
 
 export function errorHandler(err: unknown, _req: Request, res: Response, _next: NextFunction) {
   if (err instanceof ZodError) {
-    res.status(400).json({ error: 'Validation failed', details: err.flatten() });
+    const flat = err.flatten();
+    const fieldMsgs = Object.entries(flat.fieldErrors)
+      .flatMap(([key, msgs]) => (msgs ?? []).map((m) => `${key}: ${m}`));
+    const formMsgs = flat.formErrors ?? [];
+    const detail = [...formMsgs, ...fieldMsgs].filter(Boolean).join('; ');
+    res.status(400).json({
+      error: detail ? `Validation failed (${detail})` : 'Validation failed',
+      details: flat,
+    });
     return;
   }
   if (err instanceof HttpError) {
